@@ -231,7 +231,8 @@
 <div class="sheet-bg" id="unkBg">
   <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="unkTitle">
     <h3 id="unkTitle">Card not in the database</h3>
-    <div class="status" style="margin-bottom:10px">For printings the app does not know yet (older or legacy versions, reprints,
+    <div class="status" style="margin-bottom:10px">The app covers UniVersus from My Hero Academia set 1 to the latest release. Use this for anything else
+      (older Universal Fighting System cards, legacy versions, reprints,
       new releases). It is added to your collection as your own entry.</div>
     <label class="fld">Card name<input id="unkName" type="text" autocomplete="off" placeholder="As printed on the card"></label>
     <label class="fld">Set and number (optional)<input id="unkSet" type="text" autocomplete="off" placeholder="e.g. MHA01 156/180, 1st Edition"></label>
@@ -260,7 +261,7 @@ const FP = window.UVSFingerprint;
 const CARD_W = 744, CARD_H = 1039, CARD_ASPECT = CARD_W / CARD_H;
 const TESSERACT_URL = "https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js";
 const STORE_KEY = "uvs.collection.v1";
-const APP_VERSION = "2026-11-20c";
+const APP_VERSION = "2026-11-20d";
 // Where opt-in scan uploads go (the Cloudflare Worker in worker/). Empty = feature hidden.
 // For testing, localStorage "uvs.uploadUrl" overrides it.
 const DEFAULT_UPLOAD_URL = "https://uvs-scan-uploads.snuggiettv.workers.dev/scan";
@@ -353,7 +354,7 @@ async function loadData() {
     }
     S.db = FP.loadFingerprints(fp);
     await loadLearned();
-    setStatus(`Ready. ${S.cat.length} printings, ${S.db.count} with artwork fingerprints (database ${String(cat.generated || "").slice(0, 10)}).`);
+    setStatus(`Ready. Covers UniVersus from My Hero Academia set 1 to the latest release: ${S.cat.length} printings (card list of ${String(cat.generated || "").slice(0, 10)}).`);
     $("btnScan").disabled = !S.stream;
     renderCollection();
   } catch (e) {
