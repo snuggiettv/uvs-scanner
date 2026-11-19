@@ -152,6 +152,14 @@
       <label class="btn">Import JSON<input type="file" id="fileImport" accept="application/json,.json"></label>
     </div>
     <div id="collList"></div>
+    <div class="group" style="padding:12px;margin-top:18px">
+      <div style="font-weight:600">Missed scans</div>
+      <div class="status" id="missInfo">When the right card is not first, the scan picture is kept on this device so matching can be tested and improved.</div>
+      <div class="controls">
+        <button id="btnMissExport">Export missed scans</button>
+        <button id="btnMissClear">Clear</button>
+      </div>
+    </div>
   </section>
 </main>
 
@@ -171,6 +179,9 @@
       <button id="qPlus" aria-label="More">+</button>
     </div>
     <div class="chips" id="qChips"></div>
+    <label id="sheetScanRow" class="toggle hidden" style="display:flex;justify-content:center;margin-top:10px">
+      <input type="checkbox" id="sheetIsScan" checked> This is the card I just scanned
+    </label>
     <div class="after" id="qAfter"></div>
     <div class="actions">
       <button id="sheetCancel">Cancel</button>
@@ -194,7 +205,8 @@ const $ = (id) => document.getElementById(id);
 const S = {
   db: null, cat: [], byId: new Map(), byName: new Map(), names: [],
   coll: loadCollection(), stream: null, busy: false, scanSeq: 0,
-  ocrWorker: null, ocrLoading: null, sheetId: null, undo: null,
+  ocrWorker: null, ocrLoading: null, sheetId: null, sheetSource: null, undo: null,
+  searchOn: true,   // crop search; uvsDebug can turn it off to compare
 };
 
 // ------------------------------------------------------------ helpers
@@ -307,25 +319,39 @@ function layoutGuide() {
   const g = guideRect(), s = $("guide").style;
   s.left = g.x + "px"; s.top = g.y + "px"; s.width = g.w + "px"; s.height = g.h + "px";
 }
+// A capture is the guessed card area plus a margin around it (so the crop search has real pixels to
+// look at), scaled so the guessed card is CARD_W x CARD_H. base = where the card is guessed to be.
+const MARGIN = 0.12;
+function wideCapture(src, srcW, srcH, gx, gy, gw, gh) {
+  const f = CARD_W / gw;
+  const rx = Math.max(0, gx - gw * MARGIN), ry = Math.max(0, gy - gh * MARGIN);
+  const rx2 = Math.min(srcW, gx + gw * (1 + MARGIN)), ry2 = Math.min(srcH, gy + gh * (1 + MARGIN));
+  const c = document.createElement("canvas");
+  c.width = Math.round((rx2 - rx) * f); c.height = Math.round((ry2 - ry) * f);
+  const ctx = c.getContext("2d", { willReadFrequently: true });
+  ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(src, rx, ry, rx2 - rx, ry2 - ry, 0, 0, c.width, c.height);
+  return { canvas: c, base: { x: (gx - rx) * f, y: (gy - ry) * f, w: CARD_W, h: CARD_H } };
+}
 function captureFromVideo() {
   const v = $("video"), vw = v.videoWidth, vh = v.videoHeight;
   if (!vw || !vh) return null;
   const g = guideRect();
   const scale = Math.max(g.W / vw, g.H / vh);              // object-fit: cover
   const ox = (g.W - vw * scale) / 2, oy = (g.H - vh * scale) / 2;
-  const sx = (g.x - ox) / scale, sy = (g.y - oy) / scale, sw = g.w / scale, sh = g.h / scale;
-  return toCardCanvas(v, sx, sy, sw, sh);
+  return wideCapture(v, vw, vh, (g.x - ox) / scale, (g.y - oy) / scale, g.w / scale, g.h / scale);
 }
-function toCardCanvas(src, sx, sy, sw, sh) {
+function cardCanvas(wide, r) {
   const c = document.createElement("canvas");
   c.width = CARD_W; c.height = CARD_H;
   const ctx = c.getContext("2d", { willReadFrequently: true });
+  ctx.fillStyle = "#808080"; ctx.fillRect(0, 0, CARD_W, CARD_H);
   ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = "high";
-  ctx.drawImage(src, sx, sy, sw, sh, 0, 0, CARD_W, CARD_H);
+  ctx.drawImage(wide.canvas, r.x, r.y, r.w, r.h, 0, 0, CARD_W, CARD_H);
   return c;
 }
-// A photo: if it is already card-shaped use all of it, else take the largest centred card-shaped area.
-async function canvasFromBlob(blob) {
+// A photo: if it is already card-shaped the card is all of it, else the largest centred card-shaped area.
+async function wideFromBlob(blob) {
   const bmp = await createImageBitmap(blob, { imageOrientation: "from-image" });
   const w = bmp.width, h = bmp.height, a = w / h;
   let sx = 0, sy = 0, sw = w, sh = h;
@@ -333,9 +359,9 @@ async function canvasFromBlob(blob) {
     if (a > CARD_ASPECT) { sh = h * 0.92; sw = sh * CARD_ASPECT; } else { sw = w * 0.92; sh = sw / CARD_ASPECT; }
     sx = (w - sw) / 2; sy = (h - sh) / 2;
   }
-  const c = toCardCanvas(bmp, sx, sy, sw, sh);
+  const wide = wideCapture(bmp, w, h, sx, sy, sw, sh);
   bmp.close && bmp.close();
-  return c;
+  return wide;
 }
 
 // -------------------------------------------------------------- text
@@ -400,13 +426,21 @@ function matchNames(text) {
 }
 
 // ------------------------------------------------------- recognition
-async function scan(canvas) {
+// Fingerprint the capture at 27 nearby card positions; each printing keeps its best match.
+async function scan(wide) {
   if (!S.db) return;
   const seq = ++S.scanSeq;
   const t0 = performance.now();
-  const q = FP.describeArt(canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height));
-  const art = new Map(FP.rank(S.db, q, { limit: 40 }).map((r) => [r.id, r.score]));
-  const shot = { canvas, q, art, names: [], textState: $("optText").checked ? "reading" : "off" };
+  const img = wide.canvas.getContext("2d").getImageData(0, 0, wide.canvas.width, wide.canvas.height);
+  const rects = [], qs = [];
+  for (const r of S.searchOn ? FP.searchRects(wide.base) : [wide.base]) {
+    try { qs.push(FP.describeArtRect(img, r)); rects.push(r); } catch (e) { /* position falls outside the picture */ }
+  }
+  const ranked = FP.rankMulti(S.db, qs, { limit: 40 });
+  const art = new Map(ranked.map((r) => [r.id, r.score]));
+  const canvas = cardCanvas(wide, rects[ranked[0].crop]);   // the card as the best match saw it
+  const shot = { wide, canvas, qs, art, names: [], textState: $("optText").checked ? "reading" : "off", at: new Date().toISOString(), resolved: false };
+  const q = qs;
   S.lastScan = shot;
   renderResults(shot);
   setStatus(`Artwork matched in ${Math.round(performance.now() - t0)} ms.` + (shot.textState === "reading" ? " Reading text…" : ""));
@@ -417,7 +451,7 @@ async function scan(canvas) {
     if (seq !== S.scanSeq) return;
     shot.names = matchNames(data.text);
     const ids = shot.names.flatMap((h) => (S.byName.get(h.name) || []).map((p) => p.id));
-    for (const r of FP.rank(S.db, q, { candidates: ids, limit: ids.length })) shot.art.set(r.id, r.score);
+    for (const r of FP.rankMulti(S.db, q, { candidates: ids, limit: ids.length })) shot.art.set(r.id, r.score);
     shot.textState = shot.names.length ? "found" : "none";
     renderResults(shot);
     setStatus(shot.names.length ? `Text read: ${shot.names.slice(0, 3).map((h) => h.name).join(", ")}.` : "Text read, but no card name recognised. Going by artwork.");
@@ -429,7 +463,8 @@ async function scan(canvas) {
 }
 
 // Combine art similarity with the text match, group same-art twins, best first.
-function rankShot(shot) {
+function rankShot(shot, maxGroups) {
+  maxGroups = maxGroups || 6;
   const textScore = new Map();
   for (const h of shot.names) for (const p of S.byName.get(h.name) || []) textScore.set(p.id, h.score);
   const ids = new Set([...shot.art.keys(), ...textScore.keys()]);
@@ -443,7 +478,7 @@ function rankShot(shot) {
     const members = [r.id, ...(S.db.twins[r.id] || [])].filter((id) => S.byId.has(id) && !shown.has(id));
     members.forEach((id) => shown.add(id));
     groups.push(members.map((id) => rows.find((x) => x.id === id) || { id, art: shot.art.get(id) ?? null, text: textScore.get(id) || 0 }));
-    if (groups.length >= 6) break;
+    if (groups.length >= maxGroups) break;
   }
   return groups;
 }
@@ -474,9 +509,10 @@ function renderResults(shot) {
   for (const g of groups) {
     const wrap = el("div", { class: "group" });
     if (g.length > 1) wrap.append(el("div", { class: "gh" }, `Same artwork in ${g.length} printings, check the set and number:`));
-    for (const info of g) wrap.append(printingRow(S.byId.get(info.id), info, openSheet));
+    for (const info of g) wrap.append(printingRow(S.byId.get(info.id), info, (id) => openSheet(id, "scan")));
     box.append(wrap);
   }
+  if (!shot.resolved) box.append(el("p", { class: "status" }, "Not in the list? Find it by name below. The app saves this scan as a miss so matching can be improved."));
 }
 
 // ------------------------------------------------------- name search
@@ -488,17 +524,20 @@ function renderSearch() {
   const parts = q.split(" ");
   const hits = S.cat.filter((p) => { const f = fold(p.n + " " + (p.l || "")); return parts.every((w) => f.includes(w)); }).slice(0, 30);
   const wrap = el("div", { class: "group" });
-  for (const p of hits) wrap.append(printingRow(p, null, openSheet));
+  for (const p of hits) wrap.append(printingRow(p, null, (id) => openSheet(id, "search")));
   if (!hits.length) wrap.append(el("div", { class: "gh", style: "padding:12px" }, "No card with that name."));
   out.append(wrap);
 }
 
 // ------------------------------------------------------------ sheet
 let qty = 1;
-function openSheet(id) {
+function openSheet(id, source) {
   const p = S.byId.get(id);
   if (!p) return;
-  S.sheetId = id; qty = 1;
+  S.sheetId = id; S.sheetSource = source; qty = 1;
+  const askScan = source === "search" && S.lastScan && !S.lastScan.resolved;
+  $("sheetScanRow").classList.toggle("hidden", !askScan);
+  $("sheetIsScan").checked = true;
   const img = $("sheetImg");
   img.onerror = () => { if (img.src !== new URL(p.loc, location.href).href) img.src = p.loc; };
   img.src = p.th || p.loc;
@@ -518,6 +557,13 @@ function closeSheet() { $("sheetBg").classList.remove("open"); S.sheetId = null;
 function confirmAdd() {
   const id = S.sheetId, n = qty, p = S.byId.get(id);
   const before = owned(id);
+  const shot = S.lastScan;
+  if (shot && !shot.resolved && (S.sheetSource === "scan" || $("sheetIsScan").checked)) {
+    shot.resolved = true;
+    const groups = rankShot(shot, 1000);
+    const rank = groups.findIndex((g) => g.some((x) => x.id === id)) + 1;   // 0 = not among the matches
+    if (rank !== 1) saveMiss(shot, id, rank, groups.slice(0, 3).map((g) => g.map((x) => x.id)));
+  }
   addQty(id, n);
   closeSheet();
   showToast(`${p.n}: ${before} → ${owned(id)}`, () => { addQty(id, -n); renderCollection(); if (S.lastScan) renderResults(S.lastScan); });
@@ -587,19 +633,66 @@ async function importJson(file) {
   } catch (e) { alert("Could not import: " + e.message); }
 }
 
+// ------------------------------------------------------- missed scans
+// Kept in IndexedDB (pictures are too big for localStorage). Export gives one JSON file with the
+// pictures as base64 JPEG; tests/evaluate_scans.py reads it.
+function missDb() {
+  return new Promise((res, rej) => {
+    const r = indexedDB.open("uvs-scans", 1);
+    r.onupgradeneeded = () => r.result.createObjectStore("misses", { keyPath: "at" });
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+}
+async function missStore(mode) { return (await missDb()).transaction("misses", mode).objectStore("misses"); }
+const idbReq = (r) => new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+async function saveMiss(shot, pickedId, rank, top) {
+  try {
+    const jpeg = await new Promise((res) => shot.wide.canvas.toBlob(res, "image/jpeg", 0.9));
+    const rec = { at: shot.at, picked: pickedId, rank, top, names: shot.names.map((h) => h.name), textState: shot.textState,
+      base: shot.wide.base, width: shot.wide.canvas.width, height: shot.wide.canvas.height,
+      app: { search: S.searchOn, ua: navigator.userAgent }, jpeg };
+    await idbReq((await missStore("readwrite")).put(rec));
+    updateMissInfo();
+  } catch (e) { console.warn("could not save missed scan", e); }
+}
+async function updateMissInfo() {
+  try {
+    const n = await idbReq((await missStore("readonly")).count());
+    $("missInfo").textContent = n
+      ? `${n} missed scan${n === 1 ? "" : "s"} saved on this device. Export them to help improve matching.`
+      : "When the right card is not first, the scan picture is kept on this device so matching can be tested and improved.";
+    $("btnMissExport").disabled = $("btnMissClear").disabled = !n;
+  } catch (e) { $("missInfo").textContent = "Missed scans cannot be stored in this browser."; }
+}
+async function exportMisses() {
+  const recs = await idbReq((await missStore("readonly")).getAll());
+  const toB64 = (blob) => new Promise((res) => { const fr = new FileReader(); fr.onload = () => res(String(fr.result).split(",")[1]); fr.readAsDataURL(blob); });
+  const out = [];
+  for (const r of recs) out.push({ ...r, jpeg: await toB64(r.jpeg) });
+  download(`uvs-missed-scans-${stamp()}.json`, JSON.stringify({ version: 1, exported: new Date().toISOString(), scans: out }), "application/json");
+}
+async function clearMisses() {
+  if (!confirm("Delete the saved missed-scan pictures from this device?")) return;
+  await idbReq((await missStore("readwrite")).clear());
+  updateMissInfo();
+}
+
 // -------------------------------------------------------------- wire up
 function showView(which) {
   $("viewScan").classList.toggle("hidden", which !== "scan");
   $("viewColl").classList.toggle("hidden", which !== "coll");
   $("tabScan").setAttribute("aria-pressed", which === "scan");
   $("tabColl").setAttribute("aria-pressed", which === "coll");
-  if (which === "coll") renderCollection(); else layoutGuide();
+  if (which === "coll") { renderCollection(); updateMissInfo(); } else layoutGuide();
 }
 $("tabScan").onclick = () => showView("scan");
 $("tabColl").onclick = () => showView("coll");
 $("btnCam").onclick = startCamera;
 $("btnScan").onclick = () => { const c = captureFromVideo(); if (c) scan(c); };
-$("filePhoto").onchange = async (ev) => { const f = ev.target.files[0]; ev.target.value = ""; if (f) scan(await canvasFromBlob(f)); };
+$("filePhoto").onchange = async (ev) => { const f = ev.target.files[0]; ev.target.value = ""; if (f) scan(await wideFromBlob(f)); };
+$("btnMissExport").onclick = exportMisses;
+$("btnMissClear").onclick = clearMisses;
 $("optText").onchange = () => { try { localStorage.setItem("uvs.readText", $("optText").checked ? "1" : "0"); } catch (e) {} };
 try { if (localStorage.getItem("uvs.readText") === "0") $("optText").checked = false; } catch (e) {}
 $("search").oninput = renderSearch;
@@ -621,7 +714,7 @@ if ("serviceWorker" in navigator && (location.protocol === "https:" || location.
   navigator.serviceWorker.register("sw.js").catch(() => {});
 
 // For testing from the console: uvsDebug.scanUrl("assets/...webp")
-window.uvsDebug = { S, scan, matchNames, rankShot, scanUrl: async (u) => scan(await canvasFromBlob(await (await fetch(u)).blob())) };
+window.uvsDebug = { S, scan, matchNames, rankShot, wideFromBlob, wideCapture, scanUrl: async (u) => scan(await wideFromBlob(await (await fetch(u)).blob())) };
 </script>
 </body>
 </html>

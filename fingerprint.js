@@ -228,6 +228,35 @@
     return describeSmall(resizeBoxPIL(img.data, img.width, rect, WORK_W, WORK_H));
   }
 
+  /**
+   * Fingerprint of a card that sits at `card` = {x, y, w, h} (pixels, may be fractional) inside a
+   * larger image. Same result as describeArt on that card cut out at the same size, without the copy.
+   * Parts of the art area outside the image are clipped.
+   */
+  function describeArtRect(img, card) {
+    const [l, t, r, b] = ART_BOX;
+    const x0 = Math.max(0, pyRound(card.x + card.w * l)), y0 = Math.max(0, pyRound(card.y + card.h * t));
+    const x1 = Math.min(img.width, pyRound(card.x + card.w * r)), y1 = Math.min(img.height, pyRound(card.y + card.h * b));
+    if (x1 - x0 < WORK_W || y1 - y0 < WORK_H) throw new Error("card area too small");
+    return describeSmall(resizeBoxPIL(img.data, img.width, { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }, WORK_W, WORK_H));
+  }
+
+  /**
+   * Card positions to try around a best guess, to absorb framing errors: every combination of
+   * scale (card bigger/smaller than guessed) and shift (fraction of card size). 27 by default.
+   * Measured on simulated phone photos with up to 6% framing error: 82.5% -> 98% right card first.
+   */
+  function searchRects(base, scales, shifts) {
+    const out = [];
+    for (const sc of scales || [0.92, 1, 1.08])
+      for (const sy of shifts || [-0.04, 0, 0.04])
+        for (const sx of shifts || [-0.04, 0, 0.04]) {
+          const w = base.w * sc, h = base.h * sc;
+          out.push({ x: base.x + base.w / 2 + sx * base.w - w / 2, y: base.y + base.h / 2 + sy * base.h - h / 2, w, h, sc, sx, sy });
+        }
+    return out;
+  }
+
   // --------------------------------------------------------- browser glue
   /**
    * Decode an <img>, Blob/File, ImageBitmap, <canvas> or <video> frame and fingerprint it.
@@ -303,10 +332,34 @@
     return scored.slice(0, limit).map((r) => ({ ...r, twins: db.twins[r.id] || [] }));
   }
 
+  /**
+   * Like rank, but with several query fingerprints (e.g. one per searchRects position): each printing
+   * scores its best match over all of them. Results include `crop`, the index of the winning query.
+   */
+  function rankMulti(db, qs, options) {
+    if (qs.length === 1) return rank(db, qs[0], options).map((r) => ({ ...r, crop: 0 }));
+    const opts = options || {};
+    const limit = opts.limit || 10;
+    const pool = opts.candidates ? opts.candidates.map((id) => db.index.get(String(id).toLowerCase())).filter((i) => i !== undefined) : null;
+    const n = pool ? pool.length : db.count;
+    const scored = [];
+    for (let k = 0; k < n; k++) {
+      const i = pool ? pool[k] : k;
+      let best = -2, bestJ = 0;
+      for (let j = 0; j < qs.length; j++) {
+        const s = similarity(db, qs[j], i);
+        if (s > best) { best = s; bestJ = j; }
+      }
+      scored.push({ id: db.ids[i], score: best, crop: bestJ });
+    }
+    scored.sort((a, b) => b.score - a.score);
+    return scored.slice(0, limit).map((r) => ({ ...r, twins: db.twins[r.id] || [] }));
+  }
+
   const api = {
     METHOD, DIM, ART_BOX, WORK_W, WORK_H,
-    pyRound, artCropRect, resizeBoxPIL, describeSmall, describeArt, describeArtFromSource,
-    loadFingerprints, rank, halfToFloat,
+    pyRound, artCropRect, resizeBoxPIL, describeSmall, describeArt, describeArtRect, describeArtFromSource,
+    searchRects, loadFingerprints, rank, rankMulti, halfToFloat,
   };
   if (typeof module === "object" && module.exports) module.exports = api;
   else root.UVSFingerprint = api;
