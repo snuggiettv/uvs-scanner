@@ -1,0 +1,627 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#14161a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="UVS Scanner">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="icon" href="icons/icon-192.png">
+<title>UVS Card Scanner</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --panel: #ffffff; --fg: #15171b; --muted: #5d6470; --line: #dde0e5;
+    --accent: #c4312b; --accent-fg: #fff; --chip: #eceef2; --ok: #157a43; --warn: #9a5b00;
+    --shadow: 0 1px 3px rgba(0,0,0,.08), 0 4px 16px rgba(0,0,0,.06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #101215; --panel: #1a1d22; --fg: #eceef1; --muted: #9aa1ab; --line: #2b3038;
+      --accent: #e5483f; --accent-fg: #fff; --chip: #252a31; --ok: #4fc483; --warn: #f0a63a;
+      --shadow: 0 1px 3px rgba(0,0,0,.4);
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--fg); }
+  body { font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+         padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+  button, input { font: inherit; color: inherit; }
+  button { cursor: pointer; border: 0; border-radius: 10px; padding: 10px 14px; background: var(--chip); }
+  button.primary { background: var(--accent); color: var(--accent-fg); font-weight: 600; }
+  button:disabled { opacity: .5; cursor: default; }
+  header { position: sticky; top: 0; z-index: 5; background: var(--panel); border-bottom: 1px solid var(--line);
+           display: flex; align-items: center; gap: 8px; padding: 10px 16px; }
+  header h1 { font-size: 17px; margin: 0; flex: 1; }
+  nav { display: flex; gap: 6px; }
+  nav button[aria-pressed="true"] { background: var(--fg); color: var(--bg); }
+  main { max-width: 760px; margin: 0 auto; padding: 12px 16px 96px; }
+  .status { color: var(--muted); font-size: 13px; min-height: 18px; margin: 6px 0; }
+  .status.warn { color: var(--warn); }
+
+  /* camera */
+  .cam { position: relative; background: #000; border-radius: 14px; overflow: hidden; aspect-ratio: 3 / 4; max-height: 62vh; margin: 0 auto; }
+  .cam video { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .cam .guide { position: absolute; border: 3px solid rgba(255,255,255,.9); border-radius: 12px;
+                box-shadow: 0 0 0 9999px rgba(0,0,0,.45); pointer-events: none; }
+  .cam .hint { position: absolute; left: 0; right: 0; bottom: 10px; text-align: center; color: #fff; font-size: 13px;
+               text-shadow: 0 1px 2px #000; pointer-events: none; }
+  .cam .off { position: absolute; inset: 0; display: flex; flex-direction: column; gap: 10px; align-items: center; justify-content: center; color: #ddd; text-align: center; padding: 16px; }
+  .controls { display: flex; gap: 8px; margin: 10px 0; flex-wrap: wrap; }
+  .controls .grow { flex: 1; }
+  .controls label.btn { display: inline-flex; align-items: center; border-radius: 10px; padding: 10px 14px; background: var(--chip); cursor: pointer; }
+  .controls input[type=file] { display: none; }
+  .toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+
+  /* results */
+  .results h2 { font-size: 14px; margin: 14px 0 6px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+  .shot { display: flex; gap: 10px; align-items: center; margin: 8px 0; }
+  .shot canvas { width: 64px; border-radius: 6px; border: 1px solid var(--line); }
+  .group { background: var(--panel); border-radius: 12px; box-shadow: var(--shadow); margin: 8px 0; overflow: hidden; }
+  .group .gh { font-size: 12px; color: var(--muted); padding: 8px 12px 0; }
+  .pr { display: flex; gap: 12px; align-items: center; width: 100%; text-align: left; background: none; border-radius: 0; padding: 10px 12px; border-top: 1px solid var(--line); }
+  .group .pr:first-of-type { border-top: 0; }
+  .pr img { width: 54px; aspect-ratio: 744 / 1039; object-fit: cover; border-radius: 5px; background: var(--chip); flex: none; }
+  .pr .meta { flex: 1; min-width: 0; }
+  .pr .nm { font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+  .pr .sub { color: var(--muted); font-size: 13px; }
+  .pr .right { text-align: right; font-size: 12px; color: var(--muted); flex: none; }
+  .badge { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 99px; background: var(--chip); margin-right: 4px; }
+  .badge.alt-art { background: #6b3fa0; color: #fff; } .badge.promo { background: #a06a00; color: #fff; }
+  .badge.chrome { background: #3d6f8f; color: #fff; } .badge.reboot { background: #2f7d5a; color: #fff; }
+  .badge.text { background: transparent; border: 1px solid var(--ok); color: var(--ok); }
+  .owned { color: var(--ok); font-weight: 600; }
+  .search { width: 100%; padding: 11px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); }
+
+  /* sheet */
+  .sheet-bg { position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 20; display: none; align-items: flex-end; justify-content: center; }
+  .sheet-bg.open { display: flex; }
+  .sheet { background: var(--panel); width: 100%; max-width: 560px; border-radius: 18px 18px 0 0; padding: 16px 16px calc(16px + env(safe-area-inset-bottom)); max-height: 92vh; overflow: auto; }
+  .sheet .top { display: flex; gap: 14px; }
+  .sheet img { width: 132px; aspect-ratio: 744 / 1039; object-fit: cover; border-radius: 8px; background: var(--chip); flex: none; }
+  .sheet h3 { margin: 0 0 4px; font-size: 18px; }
+  .qty { display: flex; align-items: center; justify-content: center; gap: 14px; margin: 16px 0 10px; }
+  .qty button { width: 52px; height: 52px; font-size: 24px; border-radius: 50%; padding: 0; }
+  .qty output { font-size: 34px; font-weight: 700; min-width: 64px; text-align: center; }
+  .chips { display: flex; gap: 6px; justify-content: center; flex-wrap: wrap; }
+  .chips button { padding: 6px 14px; border-radius: 99px; }
+  .after { text-align: center; color: var(--muted); margin: 10px 0 14px; }
+  .sheet .actions { display: flex; gap: 8px; }
+  .sheet .actions button { flex: 1; padding: 14px; }
+
+  /* collection */
+  .summary { display: flex; gap: 10px; flex-wrap: wrap; margin: 6px 0 10px; color: var(--muted); font-size: 13px; }
+  .row { display: flex; gap: 10px; align-items: center; background: var(--panel); border-radius: 10px; padding: 8px 10px; margin: 6px 0; box-shadow: var(--shadow); }
+  .row img { width: 40px; aspect-ratio: 744 / 1039; object-fit: cover; border-radius: 4px; background: var(--chip); flex: none; }
+  .row .meta { flex: 1; min-width: 0; }
+  .row .nm { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row .sub { color: var(--muted); font-size: 12px; }
+  .row .q { display: flex; align-items: center; gap: 6px; }
+  .row .q button { width: 34px; height: 34px; padding: 0; border-radius: 50%; }
+  .row .q span { min-width: 28px; text-align: center; font-weight: 700; }
+  .toast { position: fixed; left: 50%; bottom: calc(18px + env(safe-area-inset-bottom)); transform: translateX(-50%); z-index: 30;
+           background: var(--fg); color: var(--bg); padding: 10px 14px; border-radius: 12px; display: none; gap: 12px; align-items: center; max-width: calc(100% - 32px); }
+  .toast.show { display: flex; }
+  .toast button { background: transparent; color: var(--bg); text-decoration: underline; padding: 4px; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<header>
+  <h1>UVS Scanner</h1>
+  <nav>
+    <button id="tabScan" aria-pressed="true">Scan</button>
+    <button id="tabColl" aria-pressed="false">Collection <span id="collCount"></span></button>
+  </nav>
+</header>
+
+<main>
+  <section id="viewScan">
+    <div class="cam" id="cam">
+      <video id="video" playsinline muted autoplay></video>
+      <div class="guide" id="guide"></div>
+      <div class="hint" id="camHint">Fit the card inside the frame, then tap Scan</div>
+      <div class="off" id="camOff">
+        <div>Camera is off.</div>
+        <button class="primary" id="btnCam">Start camera</button>
+        <div style="font-size:12px">iPhone needs the page opened over https for the camera. You can still use Photo.</div>
+      </div>
+    </div>
+    <div class="controls">
+      <button class="primary grow" id="btnScan" disabled>Scan</button>
+      <label class="btn">Photo<input type="file" id="filePhoto" accept="image/*" capture="environment"></label>
+      <label class="toggle"><input type="checkbox" id="optText" checked> Read text</label>
+    </div>
+    <div class="status" id="status">Loading card data…</div>
+
+    <div class="results" id="results"></div>
+
+    <h2 style="font-size:14px;color:var(--muted);margin:18px 0 6px">Find a card by name</h2>
+    <input class="search" id="search" type="search" placeholder="Type a card name" autocomplete="off">
+    <div id="searchResults"></div>
+  </section>
+
+  <section id="viewColl" class="hidden">
+    <div class="summary" id="summary"></div>
+    <input class="search" id="collFilter" type="search" placeholder="Filter your collection" autocomplete="off">
+    <div class="controls">
+      <button id="btnCsv">Export CSV</button>
+      <button id="btnJson">Export JSON</button>
+      <label class="btn">Import JSON<input type="file" id="fileImport" accept="application/json,.json"></label>
+    </div>
+    <div id="collList"></div>
+  </section>
+</main>
+
+<div class="sheet-bg" id="sheetBg">
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheetName">
+    <div class="top">
+      <img id="sheetImg" alt="">
+      <div>
+        <h3 id="sheetName"></h3>
+        <div id="sheetSub" class="sub" style="color:var(--muted)"></div>
+        <div id="sheetOwned" style="margin-top:8px"></div>
+      </div>
+    </div>
+    <div class="qty">
+      <button id="qMinus" aria-label="Fewer">−</button>
+      <output id="qVal">1</output>
+      <button id="qPlus" aria-label="More">+</button>
+    </div>
+    <div class="chips" id="qChips"></div>
+    <div class="after" id="qAfter"></div>
+    <div class="actions">
+      <button id="sheetCancel">Cancel</button>
+      <button class="primary" id="sheetAdd">Add to collection</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"><span id="toastMsg"></span><button id="toastUndo">Undo</button></div>
+
+<script src="fingerprint.js"></script>
+<script>
+"use strict";
+const FP = window.UVSFingerprint;
+const CARD_W = 744, CARD_H = 1039, CARD_ASPECT = CARD_W / CARD_H;
+const TESSERACT_URL = "https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js";
+const STORE_KEY = "uvs.collection.v1";
+const TEXT_BONUS = 0.12;      // added to the art score of printings whose name the text scan read
+const $ = (id) => document.getElementById(id);
+
+const S = {
+  db: null, cat: [], byId: new Map(), byName: new Map(), names: [],
+  coll: loadCollection(), stream: null, busy: false, scanSeq: 0,
+  ocrWorker: null, ocrLoading: null, sheetId: null, undo: null,
+};
+
+// ------------------------------------------------------------ helpers
+function el(tag, props, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(props || {})) {
+    if (v == null || v === false) continue;
+    if (k === "class") e.className = v;
+    else if (k.startsWith("on")) e.addEventListener(k.slice(2), v);
+    else if (k in e && k !== "list") e[k] = v;
+    else e.setAttribute(k, v);
+  }
+  for (const k of kids.flat()) if (k != null && k !== false) e.append(k.nodeType ? k : String(k));
+  return e;
+}
+const fold = (s) => (s || "").normalize("NFKD").replace(/[̀-ͯ]/g, "").toLowerCase()
+  .replace(/�/g, "").replace(/[^a-z0-9]+/g, " ").trim();
+function setStatus(msg, warn) { const s = $("status"); s.textContent = msg; s.classList.toggle("warn", !!warn); }
+
+function cardImg(p, cls) {
+  const img = el("img", { alt: "", loading: "lazy", decoding: "async", class: cls });
+  const srcs = [p.th, p.loc].filter(Boolean);
+  let i = 0;
+  img.onerror = () => { if (++i < srcs.length) img.src = srcs[i]; else img.onerror = null; };
+  img.src = srcs[0] || "";
+  return img;
+}
+function kindBadge(k) { return k && k !== "official" ? el("span", { class: "badge " + k }, k) : null; }
+function subLine(p) { return [p.l, p.s, p.no ? "#" + p.no : "", p.r].filter(Boolean).join(" · "); }
+
+// --------------------------------------------------------- collection
+function loadCollection() {
+  try { const v = JSON.parse(localStorage.getItem(STORE_KEY)); if (v && v.entries) return v; } catch (e) {}
+  return { version: 1, entries: {} };
+}
+function saveCollection() {
+  try { localStorage.setItem(STORE_KEY, JSON.stringify(S.coll)); }
+  catch (e) { setStatus("Could not save on this device (" + e.name + "). Export a backup now.", true); }
+  updateCount();
+}
+const owned = (id) => (S.coll.entries[id] ? S.coll.entries[id].qty : 0);
+function addQty(id, delta) {
+  const now = new Date().toISOString();
+  const e = S.coll.entries[id] || (S.coll.entries[id] = { qty: 0, added: now });
+  e.qty = Math.max(0, e.qty + delta);
+  e.updated = now;
+  if (e.qty === 0) delete S.coll.entries[id];
+  saveCollection();
+  if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+}
+function updateCount() {
+  const ents = Object.values(S.coll.entries);
+  const total = ents.reduce((a, e) => a + e.qty, 0);
+  $("collCount").textContent = total ? "(" + total + ")" : "";
+}
+
+// ------------------------------------------------------------- data
+async function loadData() {
+  try {
+    const [cat, fp] = await Promise.all([
+      fetch("data/catalog.json").then((r) => { if (!r.ok) throw new Error("catalog " + r.status); return r.json(); }),
+      fetch("data/fingerprints.json").then((r) => { if (!r.ok) throw new Error("fingerprints " + r.status); return r.json(); }),
+    ]);
+    S.cat = cat.printings;
+    for (const p of S.cat) {
+      S.byId.set(p.id, p);
+      if (!S.byName.has(p.n)) S.byName.set(p.n, []);
+      S.byName.get(p.n).push(p);
+    }
+    for (const name of S.byName.keys()) {
+      const tokens = fold(name).split(" ").filter((t) => t.length >= 2);
+      if (tokens.length) S.names.push({ name, tokens, total: tokens.reduce((a, t) => a + t.length, 0) });
+    }
+    S.db = FP.loadFingerprints(fp);
+    setStatus(`Ready. ${S.cat.length} printings, ${S.db.count} with artwork fingerprints (database ${String(cat.generated || "").slice(0, 10)}).`);
+    $("btnScan").disabled = !S.stream;
+    renderCollection();
+  } catch (e) {
+    setStatus("Could not load card data: " + e.message + ". Open the app through a web server, not as a file.", true);
+  }
+}
+
+// ----------------------------------------------------------- camera
+async function startCamera() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    setStatus("This browser cannot open the camera here (it needs https). Use Photo instead.", true);
+    return;
+  }
+  try {
+    S.stream = await navigator.mediaDevices.getUserMedia({
+      audio: false, video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1440 } },
+    });
+    const v = $("video");
+    v.srcObject = S.stream;
+    await v.play();
+    $("camOff").classList.add("hidden");
+    $("btnScan").disabled = !S.db;
+    layoutGuide();
+  } catch (e) {
+    setStatus("Camera not available: " + (e.message || e.name) + ". Use Photo instead.", true);
+  }
+}
+function guideRect() {
+  const cam = $("cam"), W = cam.clientWidth, H = cam.clientHeight;
+  let gh = H * 0.86, gw = gh * CARD_ASPECT;
+  if (gw > W * 0.86) { gw = W * 0.86; gh = gw / CARD_ASPECT; }
+  return { x: (W - gw) / 2, y: (H - gh) / 2, w: gw, h: gh, W, H };
+}
+function layoutGuide() {
+  const g = guideRect(), s = $("guide").style;
+  s.left = g.x + "px"; s.top = g.y + "px"; s.width = g.w + "px"; s.height = g.h + "px";
+}
+function captureFromVideo() {
+  const v = $("video"), vw = v.videoWidth, vh = v.videoHeight;
+  if (!vw || !vh) return null;
+  const g = guideRect();
+  const scale = Math.max(g.W / vw, g.H / vh);              // object-fit: cover
+  const ox = (g.W - vw * scale) / 2, oy = (g.H - vh * scale) / 2;
+  const sx = (g.x - ox) / scale, sy = (g.y - oy) / scale, sw = g.w / scale, sh = g.h / scale;
+  return toCardCanvas(v, sx, sy, sw, sh);
+}
+function toCardCanvas(src, sx, sy, sw, sh) {
+  const c = document.createElement("canvas");
+  c.width = CARD_W; c.height = CARD_H;
+  const ctx = c.getContext("2d", { willReadFrequently: true });
+  ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(src, sx, sy, sw, sh, 0, 0, CARD_W, CARD_H);
+  return c;
+}
+// A photo: if it is already card-shaped use all of it, else take the largest centred card-shaped area.
+async function canvasFromBlob(blob) {
+  const bmp = await createImageBitmap(blob, { imageOrientation: "from-image" });
+  const w = bmp.width, h = bmp.height, a = w / h;
+  let sx = 0, sy = 0, sw = w, sh = h;
+  if (Math.abs(a / CARD_ASPECT - 1) > 0.08) {
+    if (a > CARD_ASPECT) { sh = h * 0.92; sw = sh * CARD_ASPECT; } else { sw = w * 0.92; sh = sw / CARD_ASPECT; }
+    sx = (w - sw) / 2; sy = (h - sh) / 2;
+  }
+  const c = toCardCanvas(bmp, sx, sy, sw, sh);
+  bmp.close && bmp.close();
+  return c;
+}
+
+// -------------------------------------------------------------- text
+function loadScript(src) {
+  return new Promise((res, rej) => {
+    const s = el("script", { src, async: true });
+    s.onload = res; s.onerror = () => rej(new Error("could not load " + src));
+    document.head.append(s);
+  });
+}
+function ocrWorker() {
+  if (S.ocrWorker) return Promise.resolve(S.ocrWorker);
+  if (!S.ocrLoading) {
+    S.ocrLoading = (async () => {
+      if (!window.Tesseract) await loadScript(TESSERACT_URL);
+      S.ocrWorker = await Tesseract.createWorker("eng");
+      return S.ocrWorker;
+    })().catch((e) => { S.ocrLoading = null; throw e; });
+  }
+  return S.ocrLoading;
+}
+function lev(a, b, max) {
+  if (Math.abs(a.length - b.length) > max) return max + 1;
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i]; let best = i;
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      if (cur[j] < best) best = cur[j];
+    }
+    if (best > max) return max + 1;
+    prev = cur;
+  }
+  return prev[b.length];
+}
+// Which card names does the read text contain? Returns [{name, score}] best first.
+function matchNames(text) {
+  const words = [...new Set(fold(text).split(" ").filter((w) => w.length >= 2))];
+  const set = new Set(words), byLen = new Map();
+  for (const w of words) { if (!byLen.has(w.length)) byLen.set(w.length, []); byLen.get(w.length).push(w); }
+  const memo = new Map();
+  const found = (t) => {
+    if (memo.has(t)) return memo.get(t);
+    let ok = set.has(t);
+    if (!ok && t.length >= 4) {
+      const max = t.length >= 8 ? 2 : 1;
+      outer: for (let L = t.length - max; L <= t.length + max; L++)
+        for (const w of byLen.get(L) || []) if (lev(t, w, max) <= max) { ok = true; break outer; }
+    }
+    memo.set(t, ok);
+    return ok;
+  };
+  const hits = [];
+  for (const n of S.names) {
+    let got = 0;
+    for (const t of n.tokens) if (found(t)) got += t.length;
+    const score = got / n.total;
+    if (score >= 0.85 && (n.total >= 5 || score === 1)) hits.push({ name: n.name, score, total: n.total });
+  }
+  hits.sort((a, b) => b.score - a.score || b.total - a.total);
+  return hits.slice(0, 6);
+}
+
+// ------------------------------------------------------- recognition
+async function scan(canvas) {
+  if (!S.db) return;
+  const seq = ++S.scanSeq;
+  const t0 = performance.now();
+  const q = FP.describeArt(canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height));
+  const art = new Map(FP.rank(S.db, q, { limit: 40 }).map((r) => [r.id, r.score]));
+  const shot = { canvas, q, art, names: [], textState: $("optText").checked ? "reading" : "off" };
+  S.lastScan = shot;
+  renderResults(shot);
+  setStatus(`Artwork matched in ${Math.round(performance.now() - t0)} ms.` + (shot.textState === "reading" ? " Reading text…" : ""));
+  if (shot.textState !== "reading") return;
+  try {
+    const w = await ocrWorker();
+    const { data } = await w.recognize(canvas);
+    if (seq !== S.scanSeq) return;
+    shot.names = matchNames(data.text);
+    const ids = shot.names.flatMap((h) => (S.byName.get(h.name) || []).map((p) => p.id));
+    for (const r of FP.rank(S.db, q, { candidates: ids, limit: ids.length })) shot.art.set(r.id, r.score);
+    shot.textState = shot.names.length ? "found" : "none";
+    renderResults(shot);
+    setStatus(shot.names.length ? `Text read: ${shot.names.slice(0, 3).map((h) => h.name).join(", ")}.` : "Text read, but no card name recognised. Going by artwork.");
+  } catch (e) {
+    if (seq !== S.scanSeq) return;
+    shot.textState = "failed";
+    setStatus("Text reading unavailable (" + e.message + "). Going by artwork only.", true);
+  }
+}
+
+// Combine art similarity with the text match, group same-art twins, best first.
+function rankShot(shot) {
+  const textScore = new Map();
+  for (const h of shot.names) for (const p of S.byName.get(h.name) || []) textScore.set(p.id, h.score);
+  const ids = new Set([...shot.art.keys(), ...textScore.keys()]);
+  const rows = [...ids].map((id) => {
+    const a = shot.art.has(id) ? shot.art.get(id) : null, t = textScore.get(id) || 0;
+    return { id, art: a, text: t, score: (a == null ? 0 : a) + TEXT_BONUS * t };
+  }).sort((x, y) => y.score - x.score);
+  const shown = new Set(), groups = [];
+  for (const r of rows) {
+    if (shown.has(r.id) || !S.byId.has(r.id)) continue;
+    const members = [r.id, ...(S.db.twins[r.id] || [])].filter((id) => S.byId.has(id) && !shown.has(id));
+    members.forEach((id) => shown.add(id));
+    groups.push(members.map((id) => rows.find((x) => x.id === id) || { id, art: shot.art.get(id) ?? null, text: textScore.get(id) || 0 }));
+    if (groups.length >= 6) break;
+  }
+  return groups;
+}
+
+function printingRow(p, info, onPick) {
+  const right = el("div", { class: "right" },
+    info && info.art != null ? el("div", {}, Math.round(info.art * 100) + "% art") : null,
+    owned(p.id) ? el("div", { class: "owned" }, "own " + owned(p.id)) : null);
+  return el("button", { class: "pr", onclick: () => onPick(p.id) },
+    cardImg(p),
+    el("div", { class: "meta" },
+      el("div", { class: "nm" }, p.n),
+      el("div", { class: "sub" }, kindBadge(p.k), info && info.text ? el("span", { class: "badge text" }, "name read") : null, subLine(p))),
+    right);
+}
+
+function renderResults(shot) {
+  const box = $("results");
+  box.replaceChildren();
+  const preview = el("canvas", { width: 120, height: Math.round(120 / CARD_ASPECT) });
+  preview.getContext("2d").drawImage(shot.canvas, 0, 0, preview.width, preview.height);
+  const groups = rankShot(shot);
+  const topHasText = groups.length && groups[0].some((x) => x.text > 0);
+  const note = { reading: "Reading the card text…",
+    found: topHasText ? "Matched by name and artwork." : "The name read did not fit the artwork; matched by artwork.",
+    none: "No name read; matched by artwork.", failed: "Matched by artwork only.", off: "Matched by artwork only." }[shot.textState];
+  box.append(el("h2", {}, "Pick your card"), el("div", { class: "shot" }, preview, el("div", { class: "sub", style: "color:var(--muted);font-size:13px" }, note)));
+  for (const g of groups) {
+    const wrap = el("div", { class: "group" });
+    if (g.length > 1) wrap.append(el("div", { class: "gh" }, `Same artwork in ${g.length} printings, check the set and number:`));
+    for (const info of g) wrap.append(printingRow(S.byId.get(info.id), info, openSheet));
+    box.append(wrap);
+  }
+}
+
+// ------------------------------------------------------- name search
+function renderSearch() {
+  const q = fold($("search").value);
+  const out = $("searchResults");
+  out.replaceChildren();
+  if (q.length < 2) return;
+  const parts = q.split(" ");
+  const hits = S.cat.filter((p) => { const f = fold(p.n + " " + (p.l || "")); return parts.every((w) => f.includes(w)); }).slice(0, 30);
+  const wrap = el("div", { class: "group" });
+  for (const p of hits) wrap.append(printingRow(p, null, openSheet));
+  if (!hits.length) wrap.append(el("div", { class: "gh", style: "padding:12px" }, "No card with that name."));
+  out.append(wrap);
+}
+
+// ------------------------------------------------------------ sheet
+let qty = 1;
+function openSheet(id) {
+  const p = S.byId.get(id);
+  if (!p) return;
+  S.sheetId = id; qty = 1;
+  const img = $("sheetImg");
+  img.onerror = () => { if (img.src !== new URL(p.loc, location.href).href) img.src = p.loc; };
+  img.src = p.th || p.loc;
+  $("sheetName").textContent = p.n;
+  $("sheetSub").replaceChildren(kindBadge(p.k) || "", subLine(p));
+  $("sheetOwned").textContent = owned(id) ? `You have ${owned(id)}.` : "Not in your collection yet.";
+  $("qChips").replaceChildren(...[1, 2, 3, 4, 10].map((n) => el("button", { onclick: () => setQty(n) }, String(n))));
+  setQty(1);
+  $("sheetBg").classList.add("open");
+}
+function setQty(n) {
+  qty = Math.max(1, Math.min(999, n));
+  $("qVal").textContent = qty;
+  $("qAfter").textContent = `${owned(S.sheetId)} + ${qty} = ${owned(S.sheetId) + qty} total`;
+}
+function closeSheet() { $("sheetBg").classList.remove("open"); S.sheetId = null; }
+function confirmAdd() {
+  const id = S.sheetId, n = qty, p = S.byId.get(id);
+  const before = owned(id);
+  addQty(id, n);
+  closeSheet();
+  showToast(`${p.n}: ${before} → ${owned(id)}`, () => { addQty(id, -n); renderCollection(); if (S.lastScan) renderResults(S.lastScan); });
+  renderCollection();
+  if (S.lastScan) renderResults(S.lastScan);
+}
+let toastTimer = 0;
+function showToast(msg, undo) {
+  $("toastMsg").textContent = msg;
+  S.undo = undo;
+  $("toastUndo").classList.toggle("hidden", !undo);
+  $("toast").classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => $("toast").classList.remove("show"), 6000);
+}
+
+// ------------------------------------------------------- collection view
+function collectionRows() {
+  return Object.entries(S.coll.entries).map(([id, e]) => ({ id, e, p: S.byId.get(id) || { id, n: "(unknown printing " + id + ")", s: "", no: "", k: "" } }))
+    .sort((a, b) => a.p.n.localeCompare(b.p.n) || a.p.s.localeCompare(b.p.s));
+}
+function renderCollection() {
+  updateCount();
+  const rows = collectionRows();
+  const total = rows.reduce((a, r) => a + r.e.qty, 0);
+  const names = new Set(rows.map((r) => r.p.n)).size;
+  $("summary").textContent = `${total} cards · ${rows.length} printings · ${names} different cards`;
+  const f = fold($("collFilter").value);
+  const list = $("collList");
+  list.replaceChildren();
+  for (const { id, e, p } of rows) {
+    if (f && !fold(p.n + " " + p.s + " " + (p.l || "")).includes(f)) continue;
+    list.append(el("div", { class: "row" },
+      cardImg(p),
+      el("div", { class: "meta" }, el("div", { class: "nm" }, p.n), el("div", { class: "sub" }, kindBadge(p.k), subLine(p))),
+      el("div", { class: "q" },
+        el("button", { "aria-label": "One fewer", onclick: () => { if (e.qty > 1 || confirm(`Remove ${p.n} from your collection?`)) { addQty(id, -1); renderCollection(); } } }, "−"),
+        el("span", {}, String(e.qty)),
+        el("button", { "aria-label": "One more", onclick: () => { addQty(id, 1); renderCollection(); } }, "+"))));
+  }
+  if (!rows.length) list.append(el("p", { class: "status" }, "Nothing yet. Scan a card to start."));
+}
+function download(name, text, type) {
+  const a = el("a", { href: URL.createObjectURL(new Blob([text], { type })), download: name });
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+const stamp = () => new Date().toISOString().slice(0, 10);
+function exportCsv() {
+  const q = (v) => '"' + String(v == null ? "" : v).replace(/"/g, '""') + '"';
+  const lines = [["printing_id", "name", "set", "number", "kind", "label", "rarity", "quantity", "first_added", "last_updated"].join(",")];
+  for (const { id, e, p } of collectionRows()) lines.push([id, p.n, p.s, p.no, p.k, p.l, p.r, e.qty, e.added, e.updated].map(q).join(","));
+  download(`uvs-collection-${stamp()}.csv`, "﻿" + lines.join("\r\n"), "text/csv");
+}
+function exportJson() {
+  download(`uvs-collection-${stamp()}.json`, JSON.stringify({ ...S.coll, exported: new Date().toISOString() }, null, 1), "application/json");
+}
+async function importJson(file) {
+  try {
+    const data = JSON.parse(await file.text());
+    if (!data || typeof data.entries !== "object") throw new Error("not a collection export");
+    const n = Object.keys(data.entries).length;
+    if (!confirm(`Replace your current collection with the ${n} printings in this file?`)) return;
+    S.coll = { version: 1, entries: data.entries };
+    saveCollection(); renderCollection();
+    showToast(`Imported ${n} printings.`);
+  } catch (e) { alert("Could not import: " + e.message); }
+}
+
+// -------------------------------------------------------------- wire up
+function showView(which) {
+  $("viewScan").classList.toggle("hidden", which !== "scan");
+  $("viewColl").classList.toggle("hidden", which !== "coll");
+  $("tabScan").setAttribute("aria-pressed", which === "scan");
+  $("tabColl").setAttribute("aria-pressed", which === "coll");
+  if (which === "coll") renderCollection(); else layoutGuide();
+}
+$("tabScan").onclick = () => showView("scan");
+$("tabColl").onclick = () => showView("coll");
+$("btnCam").onclick = startCamera;
+$("btnScan").onclick = () => { const c = captureFromVideo(); if (c) scan(c); };
+$("filePhoto").onchange = async (ev) => { const f = ev.target.files[0]; ev.target.value = ""; if (f) scan(await canvasFromBlob(f)); };
+$("optText").onchange = () => { try { localStorage.setItem("uvs.readText", $("optText").checked ? "1" : "0"); } catch (e) {} };
+try { if (localStorage.getItem("uvs.readText") === "0") $("optText").checked = false; } catch (e) {}
+$("search").oninput = renderSearch;
+$("collFilter").oninput = renderCollection;
+$("qMinus").onclick = () => setQty(qty - 1);
+$("qPlus").onclick = () => setQty(qty + 1);
+$("sheetCancel").onclick = closeSheet;
+$("sheetAdd").onclick = confirmAdd;
+$("sheetBg").onclick = (e) => { if (e.target === $("sheetBg")) closeSheet(); };
+$("toastUndo").onclick = () => { if (S.undo) S.undo(); S.undo = null; $("toast").classList.remove("show"); };
+$("btnCsv").onclick = exportCsv;
+$("btnJson").onclick = exportJson;
+$("fileImport").onchange = (ev) => { const f = ev.target.files[0]; ev.target.value = ""; if (f) importJson(f); };
+window.addEventListener("resize", layoutGuide);
+layoutGuide();
+updateCount();
+loadData();
+if ("serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost" || location.hostname === "127.0.0.1"))
+  navigator.serviceWorker.register("sw.js").catch(() => {});
+
+// For testing from the console: uvsDebug.scanUrl("assets/...webp")
+window.uvsDebug = { S, scan, matchNames, rankShot, scanUrl: async (u) => scan(await canvasFromBlob(await (await fetch(u)).blob())) };
+</script>
+</body>
+</html>
