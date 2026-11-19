@@ -73,6 +73,11 @@
   .badge.chrome { background: #3d6f8f; color: #fff; } .badge.reboot { background: #2f7d5a; color: #fff; }
   .badge.text { background: transparent; border: 1px solid var(--ok); color: var(--ok); }
   .owned { color: var(--ok); font-weight: 600; }
+  .conf { display: inline-block; font-size: 13px; font-weight: 700; padding: 2px 10px; border-radius: 99px; }
+  .conf.strong { background: var(--ok); color: #fff; }
+  .conf.likely { background: transparent; border: 1.5px solid var(--ok); color: var(--ok); }
+  .conf.unsure { background: transparent; border: 1.5px solid var(--warn); color: var(--warn); }
+  .group.best { outline: 2px solid var(--ok); }
   .search { width: 100%; padding: 11px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); }
 
   /* sheet */
@@ -157,8 +162,29 @@
         <input type="checkbox" id="optContribute"> Help improve recognition
       </label>
       <div class="status">Shares the photo from each scan you confirm, and which card it was, so recognition can be
-        tested and trained on real photos. No account, name or location.</div>
+        tested and trained on real photos for everyone. No account, name or location.</div>
+      <details class="status">
+        <summary>What is shared, and how to have it deleted</summary>
+        <ul style="margin:6px 0;padding-left:18px">
+          <li>The camera picture of the card area (a little around the card too, so keep personal things out of frame).</li>
+          <li>Which card you picked, where the app ranked it, the names and numbers it read.</li>
+          <li>Phone type (iPhone / Android / other), app version, time, and a random ID made by this app on this
+            device. Your IP address is only used to limit uploads per minute and is not stored.</li>
+          <li>Nothing is sent while this is off. Scans waiting to send are discarded when you turn it off.</li>
+          <li>Pictures are stored privately and only used to improve card recognition.</li>
+        </ul>
+        <div>To have everything you shared deleted, send your ID to <span id="contactText"></span>.</div>
+        <div class="controls" style="align-items:center">
+          <code id="contribIdText" style="font-size:12px;word-break:break-all"></code>
+          <button id="btnCopyId" style="padding:6px 12px">Copy ID</button>
+        </div>
+      </details>
       <div class="status" id="contribInfo"></div>
+    </div>
+    <div class="group" style="padding:12px;margin-top:12px">
+      <div style="font-weight:600">Learning from your scans</div>
+      <div class="status" id="learnInfo"></div>
+      <div class="controls"><button id="btnLearnClear">Forget learned scans</button></div>
     </div>
     <div class="group" style="padding:12px;margin-top:12px">
       <div style="font-weight:600">Missed scans</div>
@@ -207,12 +233,17 @@ const FP = window.UVSFingerprint;
 const CARD_W = 744, CARD_H = 1039, CARD_ASPECT = CARD_W / CARD_H;
 const TESSERACT_URL = "https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js";
 const STORE_KEY = "uvs.collection.v1";
-const APP_VERSION = "2026-11-19c";
+const APP_VERSION = "2026-11-20a";
 // Where opt-in scan uploads go (the Cloudflare Worker in worker/). Empty = feature hidden.
 // For testing, localStorage "uvs.uploadUrl" overrides it.
 const DEFAULT_UPLOAD_URL = "https://uvs-scan-uploads.snuggiettv.workers.dev/scan";
 const uploadUrl = () => { try { return localStorage.getItem("uvs.uploadUrl") || DEFAULT_UPLOAD_URL; } catch (e) { return DEFAULT_UPLOAD_URL; } };
 const TEXT_BONUS = 0.12;      // added to the art score of printings whose name the text scan read
+const SETNO_BONUS = 0.03;     // per match of the read collector number / set code (settles same-art twins)
+const LEARN_PER_CARD = 8;     // learned photo references kept per printing (newest)
+const LEARN_MAX = 3000;       // learned references kept on this device
+// Who volunteers should contact to have their shared scans deleted.
+const CONTACT = "the person who invited you to help";
 const $ = (id) => document.getElementById(id);
 
 const S = {
@@ -294,6 +325,7 @@ async function loadData() {
       if (tokens.length) S.names.push({ name, tokens, total: tokens.reduce((a, t) => a + t.length, 0) });
     }
     S.db = FP.loadFingerprints(fp);
+    await loadLearned();
     setStatus(`Ready. ${S.cat.length} printings, ${S.db.count} with artwork fingerprints (database ${String(cat.generated || "").slice(0, 10)}).`);
     $("btnScan").disabled = !S.stream;
     renderCollection();
@@ -438,6 +470,44 @@ function matchNames(text) {
   return hits.slice(0, 6);
 }
 
+// Lines with their height, from tesseract.js output (blocks > paragraphs > lines, or a flat list).
+function ocrLines(data) {
+  const out = [];
+  const add = (l) => { if (l && l.text && l.bbox) out.push({ text: l.text, h: l.bbox.y1 - l.bbox.y0 }); };
+  if (Array.isArray(data.blocks) && data.blocks.length)
+    for (const b of data.blocks) for (const p of b.paragraphs || []) for (const l of p.lines || []) add(l);
+  else for (const l of data.lines || []) add(l);
+  return out;
+}
+// The bottom strip of the card, enlarged 2.5x and in grey, for the small collector line.
+function footerCanvas(card) {
+  const y0 = Math.round(CARD_H * 0.9), h = CARD_H - y0, k = 2.5;
+  const c = document.createElement("canvas");
+  c.width = Math.round(CARD_W * k); c.height = Math.round(h * k);
+  const ctx = c.getContext("2d", { willReadFrequently: true });
+  ctx.filter = "grayscale(1) contrast(1.4)";
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(card, 0, y0, CARD_W, h, 0, 0, c.width, c.height);
+  return c;
+}
+// Set codes (MHA03, UVS06, PROMO25, MHA09-CS1) and collector numbers (71/108, or the number after a code).
+function readSetNo(text) {
+  const t = (text || "").toUpperCase().replace(/[|]/g, "/");
+  const codes = new Set(), nos = new Set();
+  for (const m of t.matchAll(/\b([A-Z]{2,6}\d{2}(?:-[A-Z]{1,3}\d)?)\b/g)) codes.add(m[1]);
+  for (const m of t.matchAll(/\b(\d{1,3})\s*\/\s*\d{1,3}\b/g)) nos.add(String(+m[1]));
+  for (const m of t.matchAll(/\b[A-Z]{2,6}\d{2}(?:-[A-Z]{1,3}\d)?\b[^\n\d]{0,8}?(\d{1,3})\b(?!\s*\/)/g)) nos.add(String(+m[1]));
+  return { codes: [...codes], nos: [...nos] };
+}
+function setNoScore(p, setNo) {
+  if (!setNo || !p) return 0;
+  let s = 0;
+  if (p.no && setNo.nos.includes(String(+p.no))) s += 1;
+  const set = fold(p.s);
+  if (setNo.codes.some((c) => set.includes(fold(c)))) s += 1;
+  return s;
+}
+
 // ------------------------------------------------------- recognition
 // Fingerprint the capture at 27 nearby card positions; each printing keeps its best match.
 async function scan(wide) {
@@ -460,14 +530,27 @@ async function scan(wide) {
   if (shot.textState !== "reading") return;
   try {
     const w = await ocrWorker();
-    const { data } = await w.recognize(canvas);
+    const { data } = await w.recognize(canvas, {}, { text: true, blocks: true });
     if (seq !== S.scanSeq) return;
-    shot.names = matchNames(data.text);
+    // The card name is set in the largest type, wherever the layout puts it (top, middle or above the
+    // rules box), so names found in the tallest lines count fully; names found only elsewhere count less.
+    const big = ocrLines(data).filter((l) => (l.text.match(/[a-z]/gi) || []).length >= 3)
+      .sort((a, b) => b.h - a.h).slice(0, 4).map((l) => l.text).join("\n");
+    const merged = new Map();
+    for (const h of matchNames(big)) merged.set(h.name, { ...h, big: true });
+    for (const h of matchNames(data.text)) if (!merged.has(h.name)) merged.set(h.name, { ...h, score: h.score * 0.6 });
+    shot.names = [...merged.values()].sort((a, b) => b.score - a.score).slice(0, 6);
+    // Collector line at the bottom ("MHA03 XR-R 71/108", "PROMO25 53"): small print, so read it enlarged.
+    const { data: foot } = await w.recognize(footerCanvas(canvas));
+    if (seq !== S.scanSeq) return;
+    shot.setNo = readSetNo(foot.text + "\n" + data.text);
     const ids = shot.names.flatMap((h) => (S.byName.get(h.name) || []).map((p) => p.id));
     for (const r of FP.rankMulti(S.db, q, { candidates: ids, limit: ids.length })) shot.art.set(r.id, r.score);
-    shot.textState = shot.names.length ? "found" : "none";
+    shot.textState = shot.names.length || shot.setNo.nos.length ? "found" : "none";
     renderResults(shot);
-    setStatus(shot.names.length ? `Text read: ${shot.names.slice(0, 3).map((h) => h.name).join(", ")}.` : "Text read, but no card name recognised. Going by artwork.");
+    const said = [shot.names.length ? shot.names.slice(0, 3).map((h) => h.name).join(", ") : "",
+      shot.setNo.nos.length ? "number " + [...shot.setNo.codes, ...shot.setNo.nos].join(" ") : ""].filter(Boolean).join("; ");
+    setStatus(said ? `Text read: ${said}.` : "Text read, but no card name recognised. Going by artwork.");
   } catch (e) {
     if (seq !== S.scanSeq) return;
     shot.textState = "failed";
@@ -483,28 +566,47 @@ function rankShot(shot, maxGroups) {
   const ids = new Set([...shot.art.keys(), ...textScore.keys()]);
   const rows = [...ids].map((id) => {
     const a = shot.art.has(id) ? shot.art.get(id) : null, t = textScore.get(id) || 0;
-    return { id, art: a, text: t, score: (a == null ? 0 : a) + TEXT_BONUS * t };
+    const sn = setNoScore(S.byId.get(id), shot.setNo);
+    return { id, art: a, text: t, setNo: sn, score: (a == null ? 0 : a) + TEXT_BONUS * t + SETNO_BONUS * sn };
   }).sort((x, y) => y.score - x.score);
   const shown = new Set(), groups = [];
   for (const r of rows) {
     if (shown.has(r.id) || !S.byId.has(r.id)) continue;
     const members = [r.id, ...(S.db.twins[r.id] || [])].filter((id) => S.byId.has(id) && !shown.has(id));
     members.forEach((id) => shown.add(id));
-    groups.push(members.map((id) => rows.find((x) => x.id === id) || { id, art: shot.art.get(id) ?? null, text: textScore.get(id) || 0 }));
+    groups.push(members.map((id) => rows.find((x) => x.id === id)
+      || { id, art: shot.art.get(id) ?? null, text: textScore.get(id) || 0, setNo: 0, score: -1 })
+      .sort((x, y) => y.score - x.score));    // within same-art twins, a read set/number decides the order
     if (groups.length >= maxGroups) break;
   }
   return groups;
 }
 
+// How sure the first group is, from its lead over the next group (not the raw similarity, which is
+// often 0.4-0.7 for a correct phone photo). Simulated photos: lead >= 0.08 was right 99.7% of the
+// time, under 0.04 about half the time. Agreeing text (name or collector number) moves it up a level.
+function confidence(groups) {
+  if (!groups.length) return { cls: "unsure", label: "No match", hint: "" };
+  const best = (g) => Math.max(...g.map((x) => (x.score == null ? -1 : x.score)));
+  const lead = groups.length > 1 ? best(groups[0]) - best(groups[1]) : 1;
+  let level = lead >= 0.08 ? 2 : lead >= 0.03 ? 1 : 0;
+  if (groups[0].some((x) => x.text > 0 || x.setNo > 0) && level < 2) level++;
+  return [
+    { cls: "unsure", label: "Unsure", hint: "Check the options below, or find it by name." },
+    { cls: "likely", label: "Likely match", hint: "" },
+    { cls: "strong", label: "Strong match", hint: "" },
+  ][level];
+}
+
 function printingRow(p, info, onPick) {
   const right = el("div", { class: "right" },
-    info && info.art != null ? el("div", {}, Math.round(info.art * 100) + "% art") : null,
     owned(p.id) ? el("div", { class: "owned" }, "own " + owned(p.id)) : null);
-  return el("button", { class: "pr", onclick: () => onPick(p.id) },
+  return el("button", { class: "pr", onclick: () => onPick(p.id), title: info && info.art != null ? "art similarity " + info.art.toFixed(2) : null },
     cardImg(p),
     el("div", { class: "meta" },
       el("div", { class: "nm" }, p.n),
-      el("div", { class: "sub" }, kindBadge(p.k), info && info.text ? el("span", { class: "badge text" }, "name read") : null, subLine(p))),
+      el("div", { class: "sub" }, kindBadge(p.k), info && info.text ? el("span", { class: "badge text" }, "name read") : null,
+        info && info.setNo ? el("span", { class: "badge text" }, "number read") : null, subLine(p))),
     right);
 }
 
@@ -518,9 +620,12 @@ function renderResults(shot) {
   const note = { reading: "Reading the card text…",
     found: topHasText ? "Matched by name and artwork." : "The name read did not fit the artwork; matched by artwork.",
     none: "No name read; matched by artwork.", failed: "Matched by artwork only.", off: "Matched by artwork only." }[shot.textState];
-  box.append(el("h2", {}, "Pick your card"), el("div", { class: "shot" }, preview, el("div", { class: "sub", style: "color:var(--muted);font-size:13px" }, note)));
-  for (const g of groups) {
-    const wrap = el("div", { class: "group" });
+  const c = confidence(groups);
+  box.append(el("h2", {}, "Pick your card"), el("div", { class: "shot" }, preview,
+    el("div", {}, el("span", { class: "conf " + c.cls }, c.label),
+      el("div", { class: "sub", style: "color:var(--muted);font-size:13px;margin-top:4px" }, c.hint ? c.hint + " " + note : note))));
+  for (const [gi, g] of groups.entries()) {
+    const wrap = el("div", { class: "group" + (gi === 0 && c.cls !== "unsure" ? " best" : "") });
     if (g.length > 1) wrap.append(el("div", { class: "gh" }, `Same artwork in ${g.length} printings, check the set and number:`));
     for (const info of g) wrap.append(printingRow(S.byId.get(info.id), info, (id) => openSheet(id, "scan")));
     box.append(wrap);
@@ -571,17 +676,24 @@ function confirmAdd() {
   const id = S.sheetId, n = qty, p = S.byId.get(id);
   const before = owned(id);
   const shot = S.lastScan;
+  let fromScan = null;
   if (shot && !shot.resolved && (S.sheetSource === "scan" || $("sheetIsScan").checked)) {
     shot.resolved = true;
+    fromScan = shot;
     const groups = rankShot(shot, 1000);
     const rank = groups.findIndex((g) => g.some((x) => x.id === id)) + 1;   // 0 = not among the matches
     const top = groups.slice(0, 3).map((g) => g.map((x) => x.id));
     if (rank !== 1) saveMiss(shot, id, rank, top);
+    learnFrom(shot, id);
     if (contributing()) queueUpload(shot, id, rank, top);
   }
   addQty(id, n);
   closeSheet();
-  showToast(`${p.n}: ${before} → ${owned(id)}`, () => { addQty(id, -n); renderCollection(); if (S.lastScan) renderResults(S.lastScan); });
+  showToast(`${p.n}: ${before} → ${owned(id)}`, () => {
+    addQty(id, -n);
+    if (fromScan) { fromScan.resolved = false; forgetScan(fromScan.at); }
+    renderCollection(); if (S.lastScan) renderResults(S.lastScan);
+  });
   renderCollection();
   if (S.lastScan) renderResults(S.lastScan);
 }
@@ -648,17 +760,77 @@ async function importJson(file) {
   } catch (e) { alert("Could not import: " + e.message); }
 }
 
+// ------------------------------------------- learning from confirmed scans
+// Each confirmed scan's fingerprint (at the crop that fit the picked card best) is kept on this device
+// as an extra reference for that printing, so the next scan of it in the same conditions (sleeve,
+// lighting, camera) matches more strongly. Crowd references (data/learned.json, built from shared scans
+// by tests/build_learned.py) are loaded too. How they are scored: similarity() in fingerprint.js.
+async function loadLearned() {
+  FP.clearReferences(S.db);
+  let crowd = 0, mine = 0;
+  try {
+    const r = await fetch("data/learned.json");
+    if (r.ok) crowd = FP.addReferences(S.db, FP.loadReferences(await r.json()), LEARN_PER_CARD);
+  } catch (e) { /* none published yet */ }
+  try {
+    const recs = await idbReq((await missStore("readonly", "learned")).getAll());
+    recs.sort((a, b) => (a.at < b.at ? -1 : 1));
+    mine = FP.addReferences(S.db, recs, LEARN_PER_CARD);
+  } catch (e) {}
+  S.learned = { crowd, mine };
+}
+async function learnFrom(shot, id) {
+  try {
+    if (!S.db.index.has(id) || !shot.qs.length) return;
+    const [best] = FP.rankMulti(S.db, shot.qs, { candidates: [id], limit: 1 });
+    const rec = { at: shot.at, id, v: Float32Array.from(shot.qs[best.crop]) };
+    await idbReq((await missStore("readwrite", "learned")).put(rec));
+    FP.addReferences(S.db, [rec], LEARN_PER_CARD);
+    const store = await missStore("readwrite", "learned");
+    const n = await idbReq(store.count());
+    if (n > LEARN_MAX) {                                   // drop the oldest
+      let extra = n - LEARN_MAX;
+      store.openCursor().onsuccess = (e) => { const c = e.target.result; if (c && extra-- > 0) { c.delete(); c.continue(); } };
+    }
+  } catch (e) { console.warn("could not learn from scan", e); }
+}
+// Undo of an add: the scan may have been confirmed as the wrong card, so forget everything kept from it.
+async function forgetScan(at) {
+  for (const name of ["learned", "uploads", "misses"]) {
+    try { await idbReq((await missStore("readwrite", name)).delete(at)); } catch (e) {}
+  }
+  await loadLearned();
+  updateMissInfo(); updateUploadInfo(); updateLearnInfo();
+}
+async function updateLearnInfo() {
+  let n = 0;
+  try { n = await idbReq((await missStore("readonly", "learned")).count()); } catch (e) {}
+  const crowd = S.learned ? S.learned.crowd : 0;
+  $("learnInfo").textContent = (n
+    ? `Learned from ${n} of your confirmed scan${n === 1 ? "" : "s"}: cards you have scanned before match more strongly in your conditions.`
+    : "Each scan you confirm is remembered on this device, so the same card matches more strongly next time.")
+    + (crowd ? ` Plus ${crowd} community scan references.` : "");
+  $("btnLearnClear").disabled = !n;
+}
+async function clearLearned() {
+  if (!confirm("Forget what the app learned from your scans on this device?")) return;
+  await idbReq((await missStore("readwrite", "learned")).clear());
+  await loadLearned();
+  updateLearnInfo();
+}
+
 // ------------------------------------------------------- missed scans
 // Kept in IndexedDB (pictures are too big for localStorage). Export gives one JSON file with the
 // pictures as base64 JPEG; tests/evaluate_scans.py reads it.
 let missDbP = null;
 function missDb() {
   return missDbP || (missDbP = new Promise((res, rej) => {
-    const r = indexedDB.open("uvs-scans", 2);
+    const r = indexedDB.open("uvs-scans", 3);
     r.onupgradeneeded = () => {
       const db = r.result;
       if (!db.objectStoreNames.contains("misses")) db.createObjectStore("misses", { keyPath: "at" });
       if (!db.objectStoreNames.contains("uploads")) db.createObjectStore("uploads", { keyPath: "at" });
+      if (!db.objectStoreNames.contains("learned")) db.createObjectStore("learned", { keyPath: "at" });
     };
     r.onsuccess = () => res(r.result);
     r.onerror = () => { missDbP = null; rej(r.error); };
@@ -728,6 +900,11 @@ async function updateUploadInfo() {
   if (!uploadUrl()) { box.classList.add("hidden"); return; }
   box.classList.remove("hidden");
   $("optContribute").checked = contributing();
+  $("contactText").textContent = CONTACT;
+  let cid = "";
+  try { cid = localStorage.getItem("uvs.contributor") || ""; } catch (e) {}
+  $("contribIdText").textContent = cid || "(made when you turn sharing on)";
+  $("btnCopyId").disabled = !cid;
   let waiting = 0, sent = 0;
   try { waiting = await idbReq((await missStore("readonly", "uploads")).count()); } catch (e) {}
   try { sent = +(localStorage.getItem("uvs.uploaded") || 0); } catch (e) {}
@@ -743,7 +920,13 @@ function toggleContribute() {
   }
   try { localStorage.setItem("uvs.contribute", on ? "1" : "0"); } catch (e) {}
   if (on) contributorId();
+  else (async () => { try { await idbReq((await missStore("readwrite", "uploads")).clear()); } catch (e) {} updateUploadInfo(); })();
   flushUploads();
+}
+function copyContributorId() {
+  const id = $("contribIdText").textContent;
+  (navigator.clipboard ? navigator.clipboard.writeText(id) : Promise.reject())
+    .then(() => showToast("ID copied."), () => prompt("Your contributor ID:", id));
 }
 async function updateMissInfo() {
   try {
@@ -773,8 +956,10 @@ function showView(which) {
   $("viewColl").classList.toggle("hidden", which !== "coll");
   $("tabScan").setAttribute("aria-pressed", which === "scan");
   $("tabColl").setAttribute("aria-pressed", which === "coll");
-  if (which === "coll") { renderCollection(); updateMissInfo(); updateUploadInfo(); } else layoutGuide();
+  if (which === "coll") { renderCollection(); updateMissInfo(); updateUploadInfo(); updateLearnInfo(); } else layoutGuide();
 }
+$("btnCopyId").onclick = copyContributorId;
+$("btnLearnClear").onclick = clearLearned;
 $("tabScan").onclick = () => showView("scan");
 $("tabColl").onclick = () => showView("coll");
 $("btnCam").onclick = startCamera;

@@ -305,11 +305,56 @@
     return { ids: json.ids, dim: DIM, count: n, matrix, index, twins: json.twins || {}, twinThreshold: json.twin_threshold };
   }
 
-  function similarity(db, q, i) {
+  function dot(a, ao, q) {
     let s = 0;
-    const o = i * DIM;
-    for (let d = 0; d < DIM; d++) s += db.matrix[o + d] * q[d];
+    for (let d = 0; d < DIM; d++) s += a[ao + d] * q[d];
     return s;
+  }
+  // Similarity to the clean official image, raised by learned real-photo references when they agree:
+  // max(clean, (clean + learned) / 2). A learned photo can help its printing but cannot outvote the
+  // clean image on its own (tests/learning_experiment.py: re-scans 136 -> 144 of 150, unseen unchanged;
+  // plain max hurt unseen cards).
+  function similarity(db, q, i) {
+    const clean = dot(db.matrix, i * DIM, q);
+    const refs = db.extra && db.extra.get(i);
+    if (!refs) return clean;
+    let best = clean;
+    for (const v of refs) { const b = (clean + dot(v, 0, q)) / 2; if (b > best) best = b; }
+    return best;
+  }
+
+  /**
+   * Add learned reference fingerprints (real photos confirmed as a printing).
+   * refs: [{id, v}] with v a Float32Array/array of DIM numbers. maxPer: keep the newest N per printing.
+   * Unknown ids are ignored. Returns how many were added.
+   */
+  function addReferences(db, refs, maxPer) {
+    maxPer = maxPer || 8;
+    if (!db.extra) db.extra = new Map();
+    let n = 0;
+    for (const r of refs) {
+      const i = db.index.get(String(r.id).toLowerCase());
+      if (i === undefined || !r.v || r.v.length !== DIM) continue;
+      const list = db.extra.get(i) || [];
+      list.push(r.v instanceof Float32Array ? r.v : Float32Array.from(r.v));
+      if (list.length > maxPer) list.shift();
+      db.extra.set(i, list);
+      n++;
+    }
+    return n;
+  }
+  function clearReferences(db) { db.extra = new Map(); }
+
+  /** Parse a learned.json (same format as fingerprints.json, ids may repeat) into [{id, v}]. */
+  function loadReferences(json) {
+    if (!json.spec || json.spec.method !== METHOD || json.dim !== DIM) throw new Error("learned references were built with a different method");
+    const bytes = base64ToBytes(json.data);
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    return json.ids.map((id, k) => {
+      const v = new Float32Array(DIM);
+      for (let d = 0; d < DIM; d++) v[d] = halfToFloat(view.getUint16((k * DIM + d) * 2, true));
+      return { id, v };
+    });
   }
 
   /**
@@ -360,6 +405,7 @@
     METHOD, DIM, ART_BOX, WORK_W, WORK_H,
     pyRound, artCropRect, resizeBoxPIL, describeSmall, describeArt, describeArtRect, describeArtFromSource,
     searchRects, loadFingerprints, rank, rankMulti, halfToFloat,
+    addReferences, clearReferences, loadReferences,
   };
   if (typeof module === "object" && module.exports) module.exports = api;
   else root.UVSFingerprint = api;
