@@ -81,6 +81,9 @@
   .badge.custom { background: transparent; border: 1px dashed var(--muted); color: var(--muted); }
   .fld { display: block; font-size: 13px; color: var(--muted); margin: 8px 0; }
   .fld input { display: block; width: 100%; margin-top: 4px; padding: 11px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); font-size: 16px; }
+  .sheet-bg.center { align-items: center; padding: 16px; }
+  .sheet.welcome { border-radius: 18px; max-height: calc(100vh - 32px); }
+  .steps { margin: 0; padding-left: 20px; } .steps li { margin: 8px 0; font-size: 14px; }
   .linkish { background: none; padding: 6px 0; color: var(--accent); text-decoration: underline; font-size: 14px; }
   .search { width: 100%; padding: 11px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); }
 
@@ -123,6 +126,7 @@
   <nav>
     <button id="tabScan" aria-pressed="true">Scan</button>
     <button id="tabColl" aria-pressed="false">Collection <span id="collCount"></span></button>
+    <button id="btnHelp" aria-label="How to use the scanner" style="padding:10px 13px">?</button>
   </nav>
 </header>
 
@@ -252,6 +256,31 @@
   </div>
 </div>
 
+<div class="sheet-bg center" id="helpBg">
+  <div class="sheet welcome" role="dialog" aria-modal="true" aria-labelledby="helpTitle">
+    <h3 id="helpTitle">Welcome to UVS Scanner</h3>
+    <div class="status" style="margin:0 0 10px">A test version. It covers UniVersus from My Hero Academia set 1 to the latest
+      release. Your collection is saved on this phone, in this browser.</div>
+    <ol class="steps">
+      <li><b>Scan.</b> Tap <b>Start camera</b> and allow the camera. Fill the white frame with the card, flat and in
+        good light, then tap <b>Scan</b>. Tip: tilt shiny foil cards away from the light.</li>
+      <li><b>Pick the card.</b> Tap the right printing, choose how many, and tap <b>Add to collection</b>.
+        Not in the list? Type its name under <b>Find a card by name</b>. Not in the app at all? Tap
+        <b>My card isn't in the database</b>.</li>
+      <li><b>Help the scanner learn.</b> Go to the <b>Collection</b> tab and tick <b>Help improve recognition</b>
+        (bottom of the page). Every scan you confirm, right or wrong, is then shared to improve matching for
+        everyone: the card photo and which card it was. No name, account or location. Wrong matches help most,
+        so always pick the right card, even when the app guessed wrong.</li>
+      <li><b>Back up.</b> Collection tab > <b>Export CSV</b> or <b>Export JSON</b> keeps a copy of your collection.</li>
+    </ol>
+    <div class="actions" style="margin-top:14px">
+      <button id="helpClose">Got it</button>
+      <button class="primary" id="helpShare">Help improve recognition</button>
+    </div>
+    <div class="status" style="text-align:center;margin-top:8px">Open these steps again any time with the <b>?</b> button.</div>
+  </div>
+</div>
+
 <div class="toast" id="toast"><span id="toastMsg"></span><button id="toastUndo">Undo</button></div>
 
 <script src="fingerprint.js"></script>
@@ -261,7 +290,7 @@ const FP = window.UVSFingerprint;
 const CARD_W = 744, CARD_H = 1039, CARD_ASPECT = CARD_W / CARD_H;
 const TESSERACT_URL = "https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js";
 const STORE_KEY = "uvs.collection.v1";
-const APP_VERSION = "2026-11-20d";
+const APP_VERSION = "2026-11-20e";
 // Where opt-in scan uploads go (the Cloudflare Worker in worker/). Empty = feature hidden.
 // For testing, localStorage "uvs.uploadUrl" overrides it.
 const DEFAULT_UPLOAD_URL = "https://uvs-scan-uploads.snuggiettv.workers.dev/scan";
@@ -1133,6 +1162,22 @@ window.addEventListener("resize", layoutGuide);
 layoutGuide();
 updateCount();
 loadData();
+// First launch: show how to use it and how to help (once; the ? button reopens it).
+function openHelp() {
+  $("helpShare").classList.toggle("hidden", contributing() || !uploadUrl());
+  $("helpBg").classList.add("open");
+}
+function closeHelp() { $("helpBg").classList.remove("open"); try { localStorage.setItem("uvs.welcomed", "1"); } catch (e) {} }
+$("btnHelp").onclick = openHelp;
+$("helpClose").onclick = closeHelp;
+$("helpBg").onclick = (e) => { if (e.target === $("helpBg")) closeHelp(); };
+$("helpShare").onclick = () => {
+  closeHelp();
+  $("optContribute").checked = true;
+  toggleContribute();                      // asks for consent with the full explanation
+  if (contributing()) { showView("coll"); $("contribBox").scrollIntoView({ block: "center" }); }
+};
+try { if (!localStorage.getItem("uvs.welcomed")) openHelp(); } catch (e) {}
 if ("serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost" || location.hostname === "127.0.0.1"))
   navigator.serviceWorker.register("sw.js").catch(() => {});
 
