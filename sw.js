@@ -2,7 +2,7 @@
 // App files and card data: network first (so updates arrive), cached copy when offline.
 // Text-reading library and its language data (from CDNs): cache first, fetched once.
 // Card pictures: cache first, filled as they are viewed.
-const VERSION = "uvs-20261119-121938";
+const VERSION = "uvs-20261119-131652";
 const SHELL = ["uvs_scanner.html", "fingerprint.js", "manifest.webmanifest", "icons/icon-192.png", "icons/icon-512.png",
   "data/catalog.json", "data/fingerprints.json"];
 

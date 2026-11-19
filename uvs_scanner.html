@@ -233,7 +233,7 @@ const FP = window.UVSFingerprint;
 const CARD_W = 744, CARD_H = 1039, CARD_ASPECT = CARD_W / CARD_H;
 const TESSERACT_URL = "https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js";
 const STORE_KEY = "uvs.collection.v1";
-const APP_VERSION = "2026-11-20a";
+const APP_VERSION = "2026-11-20b";
 // Where opt-in scan uploads go (the Cloudflare Worker in worker/). Empty = feature hidden.
 // For testing, localStorage "uvs.uploadUrl" overrides it.
 const DEFAULT_UPLOAD_URL = "https://uvs-scan-uploads.snuggiettv.workers.dev/scan";
@@ -508,6 +508,61 @@ function setNoScore(p, setNo) {
   return s;
 }
 
+// Find the card in the capture by its outline, so it still matches when it is smaller than the guide
+// or off-centre. Port of find_card in tests/card_finder_experiment.py: on a 240 px wide copy, every
+// upright card-shaped rectangle (35%-115% of the guide size, any position) is scored by how strong the
+// brightness edges are along all four sides. Inner frames (art window) also score well, so the card is the
+// largest rectangle scoring at least 70% of the best. On 23 real iPhone scans: 13 -> 18 right first.
+function findCard(wide) {
+  const src = wide.canvas, k = 240 / src.width;
+  const W = 240, H = Math.round(src.height * k);
+  const c = document.createElement("canvas");
+  c.width = W; c.height = H;
+  const ctx = c.getContext("2d", { willReadFrequently: true });
+  ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(src, 0, 0, W, H);
+  const d = ctx.getImageData(0, 0, W, H).data;
+  const g = new Float32Array(W * H);
+  for (let i = 0; i < W * H; i++) g[i] = 0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2];
+  // Column sums of |d/dx| (vertical edges) and row sums of |d/dy| (horizontal edges), as running totals.
+  const cx = new Float32Array((H + 1) * W), cy = new Float32Array(H * (W + 1));
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = y * W + x;
+    const gx = x === 0 ? g[i + 1] - g[i] : x === W - 1 ? g[i] - g[i - 1] : (g[i + 1] - g[i - 1]) / 2;
+    const gy = y === 0 ? g[i + W] - g[i] : y === H - 1 ? g[i] - g[i - W] : (g[i + W] - g[i - W]) / 2;
+    cx[(y + 1) * W + x] = cx[y * W + x] + Math.abs(gx);
+    cy[y * (W + 1) + x + 1] = cy[y * (W + 1) + x] + Math.abs(gy);
+  }
+  const bw = wide.base.w * k, all = [];
+  for (let s = 0.35; s < 1.16; s += 0.025) {
+    const w = bw * s, h = w / CARD_ASPECT, wi = Math.round(w), hi = Math.round(h);
+    if (wi < 30 || hi >= H - 1 || wi >= W - 1) continue;
+    const top = [];
+    const v = (y, xc) => (cx[(y + hi) * W + xc] - cx[y * W + xc]) / hi;
+    const hz = (yc, x) => (cy[yc * (W + 1) + x + wi] - cy[yc * (W + 1) + x]) / wi;
+    for (let y = 1; y < H - hi - 1; y++) for (let x = 1; x < W - wi - 1; x++) {
+      const L = Math.max(v(y, x), v(y, x - 1), v(y, x + 1));
+      const R = Math.max(v(y, x + wi), v(y, x + wi - 1), v(y, Math.min(x + wi + 1, W - 1)));
+      const T = Math.max(hz(y, x), hz(y - 1, x), hz(y + 1, x));
+      const B = Math.max(hz(y + hi, x), hz(y + hi - 1, x), hz(Math.min(y + hi + 1, H - 1), x));
+      const sc = Math.min(L, R, T, B) * 0.6 + (L + R + T + B) / 4 * 0.4;
+      if (top.length < 6 || sc > top[top.length - 1][0]) {
+        top.push([sc, x, y, w, h]); top.sort((a, b) => b[0] - a[0]); if (top.length > 6) top.pop();
+      }
+    }
+    all.push(...top);
+  }
+  if (!all.length) return [];
+  all.sort((a, b) => b[0] - a[0]);
+  const strong = all.filter((a) => a[0] >= 0.7 * all[0][0]).sort((a, b) => b[3] - a[3]);
+  const out = [];
+  for (const [, x, y, w, h] of [strong[0], ...all]) {
+    if (out.every((o) => Math.abs(x - o[0]) > 0.05 * w || Math.abs(y - o[1]) > 0.05 * h || Math.abs(w - o[2]) > 0.05 * w)) out.push([x, y, w, h]);
+    if (out.length >= 2) break;
+  }
+  return out.map(([x, y, w, h]) => ({ x: x / k, y: y / k, w: w / k, h: h / k }));
+}
+
 // ------------------------------------------------------- recognition
 // Fingerprint the capture at 27 nearby card positions; each printing keeps its best match.
 async function scan(wide) {
@@ -516,7 +571,8 @@ async function scan(wide) {
   const t0 = performance.now();
   const img = wide.canvas.getContext("2d").getImageData(0, 0, wide.canvas.width, wide.canvas.height);
   const rects = [], qs = [];
-  for (const r of S.searchOn ? FP.searchRects(wide.base) : [wide.base]) {
+  const bases = S.searchOn ? [wide.base, ...findCard(wide)] : [wide.base];
+  for (const r of S.searchOn ? bases.flatMap((b) => FP.searchRects(b)) : bases) {
     try { qs.push(FP.describeArtRect(img, r)); rects.push(r); } catch (e) { /* position falls outside the picture */ }
   }
   const ranked = FP.rankMulti(S.db, qs, { limit: 40 });
