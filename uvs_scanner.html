@@ -152,7 +152,15 @@
       <label class="btn">Import JSON<input type="file" id="fileImport" accept="application/json,.json"></label>
     </div>
     <div id="collList"></div>
-    <div class="group" style="padding:12px;margin-top:18px">
+    <div class="group hidden" id="contribBox" style="padding:12px;margin-top:18px">
+      <label class="toggle" style="color:var(--fg);font-weight:600;font-size:15px">
+        <input type="checkbox" id="optContribute"> Help improve recognition
+      </label>
+      <div class="status">Shares the photo from each scan you confirm, and which card it was, so recognition can be
+        tested and trained on real photos. No account, name or location.</div>
+      <div class="status" id="contribInfo"></div>
+    </div>
+    <div class="group" style="padding:12px;margin-top:12px">
       <div style="font-weight:600">Missed scans</div>
       <div class="status" id="missInfo">When the right card is not first, the scan picture is kept on this device so matching can be tested and improved.</div>
       <div class="controls">
@@ -199,6 +207,11 @@ const FP = window.UVSFingerprint;
 const CARD_W = 744, CARD_H = 1039, CARD_ASPECT = CARD_W / CARD_H;
 const TESSERACT_URL = "https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js";
 const STORE_KEY = "uvs.collection.v1";
+const APP_VERSION = "2026-11-19c";
+// Where opt-in scan uploads go (the Cloudflare Worker in worker/). Empty = feature hidden.
+// For testing, localStorage "uvs.uploadUrl" overrides it.
+const DEFAULT_UPLOAD_URL = "https://uvs-scan-uploads.snuggiettv.workers.dev/scan";
+const uploadUrl = () => { try { return localStorage.getItem("uvs.uploadUrl") || DEFAULT_UPLOAD_URL; } catch (e) { return DEFAULT_UPLOAD_URL; } };
 const TEXT_BONUS = 0.12;      // added to the art score of printings whose name the text scan read
 const $ = (id) => document.getElementById(id);
 
@@ -562,7 +575,9 @@ function confirmAdd() {
     shot.resolved = true;
     const groups = rankShot(shot, 1000);
     const rank = groups.findIndex((g) => g.some((x) => x.id === id)) + 1;   // 0 = not among the matches
-    if (rank !== 1) saveMiss(shot, id, rank, groups.slice(0, 3).map((g) => g.map((x) => x.id)));
+    const top = groups.slice(0, 3).map((g) => g.map((x) => x.id));
+    if (rank !== 1) saveMiss(shot, id, rank, top);
+    if (contributing()) queueUpload(shot, id, rank, top);
   }
   addQty(id, n);
   closeSheet();
@@ -636,25 +651,99 @@ async function importJson(file) {
 // ------------------------------------------------------- missed scans
 // Kept in IndexedDB (pictures are too big for localStorage). Export gives one JSON file with the
 // pictures as base64 JPEG; tests/evaluate_scans.py reads it.
+let missDbP = null;
 function missDb() {
-  return new Promise((res, rej) => {
-    const r = indexedDB.open("uvs-scans", 1);
-    r.onupgradeneeded = () => r.result.createObjectStore("misses", { keyPath: "at" });
+  return missDbP || (missDbP = new Promise((res, rej) => {
+    const r = indexedDB.open("uvs-scans", 2);
+    r.onupgradeneeded = () => {
+      const db = r.result;
+      if (!db.objectStoreNames.contains("misses")) db.createObjectStore("misses", { keyPath: "at" });
+      if (!db.objectStoreNames.contains("uploads")) db.createObjectStore("uploads", { keyPath: "at" });
+    };
     r.onsuccess = () => res(r.result);
-    r.onerror = () => rej(r.error);
-  });
+    r.onerror = () => { missDbP = null; rej(r.error); };
+  }));
 }
-async function missStore(mode) { return (await missDb()).transaction("misses", mode).objectStore("misses"); }
+async function missStore(mode, name) { return (await missDb()).transaction(name || "misses", mode).objectStore(name || "misses"); }
 const idbReq = (r) => new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+const device = () => /iPhone|iPad/.test(navigator.userAgent) ? "ios" : /Android/.test(navigator.userAgent) ? "android" : "other";
+async function scanRecord(shot, pickedId, rank, top) {
+  const jpeg = await new Promise((res) => shot.wide.canvas.toBlob(res, "image/jpeg", 0.9));
+  return { at: shot.at, picked: pickedId, rank, top, names: shot.names.map((h) => h.name), textState: shot.textState,
+    base: shot.wide.base, width: shot.wide.canvas.width, height: shot.wide.canvas.height,
+    search: S.searchOn, device: device(), appVersion: APP_VERSION, jpeg };
+}
 async function saveMiss(shot, pickedId, rank, top) {
   try {
-    const jpeg = await new Promise((res) => shot.wide.canvas.toBlob(res, "image/jpeg", 0.9));
-    const rec = { at: shot.at, picked: pickedId, rank, top, names: shot.names.map((h) => h.name), textState: shot.textState,
-      base: shot.wide.base, width: shot.wide.canvas.width, height: shot.wide.canvas.height,
-      app: { search: S.searchOn, ua: navigator.userAgent }, jpeg };
+    const rec = await scanRecord(shot, pickedId, rank, top);    // before opening the store: it closes while we wait
     await idbReq((await missStore("readwrite")).put(rec));
     updateMissInfo();
   } catch (e) { console.warn("could not save missed scan", e); }
+}
+
+// ------------------------------------------------------ opt-in uploads
+// Confirmed scans (hits and misses) are queued in IndexedDB and sent when online, so nothing is lost
+// on a bad connection. Only the scan picture and the fields in scanRecord are sent, plus a random
+// contributor id for this device.
+function contributing() { try { return !!uploadUrl() && localStorage.getItem("uvs.contribute") === "1"; } catch (e) { return false; } }
+function contributorId() {
+  try {
+    let id = localStorage.getItem("uvs.contributor");
+    if (!id) { id = crypto.randomUUID(); localStorage.setItem("uvs.contributor", id); }
+    return id;
+  } catch (e) { return ""; }
+}
+async function queueUpload(shot, pickedId, rank, top) {
+  try {
+    const rec = await scanRecord(shot, pickedId, rank, top);
+    await idbReq((await missStore("readwrite", "uploads")).put(rec));
+    flushUploads();
+  } catch (e) { console.warn("could not queue upload", e); }
+}
+let flushing = false;
+async function flushUploads() {
+  if (flushing || !contributing() || !navigator.onLine) return updateUploadInfo();
+  flushing = true;
+  try {
+    const recs = await idbReq((await missStore("readonly", "uploads")).getAll());
+    for (const r of recs) {
+      const { jpeg, ...meta } = r;
+      const fd = new FormData();
+      fd.append("meta", JSON.stringify({ ...meta, contributor: contributorId() }));
+      fd.append("image", jpeg, "scan.jpg");
+      let status = 0;
+      try { status = (await fetch(uploadUrl(), { method: "POST", body: fd })).status; } catch (e) { break; }
+      if (status === 429 || status >= 500) break;                  // try again later
+      await idbReq((await missStore("readwrite", "uploads")).delete(r.at)); // sent, or rejected for good
+      if (status >= 200 && status < 300) {
+        try { localStorage.setItem("uvs.uploaded", String(+(localStorage.getItem("uvs.uploaded") || 0) + 1)); } catch (e) {}
+      }
+    }
+  } catch (e) { console.warn("upload failed", e); }
+  flushing = false;
+  updateUploadInfo();
+}
+async function updateUploadInfo() {
+  const box = $("contribBox");
+  if (!uploadUrl()) { box.classList.add("hidden"); return; }
+  box.classList.remove("hidden");
+  $("optContribute").checked = contributing();
+  let waiting = 0, sent = 0;
+  try { waiting = await idbReq((await missStore("readonly", "uploads")).count()); } catch (e) {}
+  try { sent = +(localStorage.getItem("uvs.uploaded") || 0); } catch (e) {}
+  $("contribInfo").textContent = contributing()
+    ? `Thank you! ${sent} scan${sent === 1 ? "" : "s"} shared` + (waiting ? `, ${waiting} waiting to send.` : ".")
+    : "Off. Nothing is uploaded.";
+}
+function toggleContribute() {
+  const on = $("optContribute").checked;
+  if (on && !confirm("Share your scans to help improve recognition?\n\nFor each scan you confirm, the app uploads the photo of the card and which card you picked, with a random ID for this device. No account, name or location is sent. You can turn this off any time.")) {
+    $("optContribute").checked = false;
+    return;
+  }
+  try { localStorage.setItem("uvs.contribute", on ? "1" : "0"); } catch (e) {}
+  if (on) contributorId();
+  flushUploads();
 }
 async function updateMissInfo() {
   try {
@@ -684,13 +773,16 @@ function showView(which) {
   $("viewColl").classList.toggle("hidden", which !== "coll");
   $("tabScan").setAttribute("aria-pressed", which === "scan");
   $("tabColl").setAttribute("aria-pressed", which === "coll");
-  if (which === "coll") { renderCollection(); updateMissInfo(); } else layoutGuide();
+  if (which === "coll") { renderCollection(); updateMissInfo(); updateUploadInfo(); } else layoutGuide();
 }
 $("tabScan").onclick = () => showView("scan");
 $("tabColl").onclick = () => showView("coll");
 $("btnCam").onclick = startCamera;
 $("btnScan").onclick = () => { const c = captureFromVideo(); if (c) scan(c); };
 $("filePhoto").onchange = async (ev) => { const f = ev.target.files[0]; ev.target.value = ""; if (f) scan(await wideFromBlob(f)); };
+$("optContribute").onchange = toggleContribute;
+window.addEventListener("online", flushUploads);
+flushUploads();
 $("btnMissExport").onclick = exportMisses;
 $("btnMissClear").onclick = clearMisses;
 $("optText").onchange = () => { try { localStorage.setItem("uvs.readText", $("optText").checked ? "1" : "0"); } catch (e) {} };
