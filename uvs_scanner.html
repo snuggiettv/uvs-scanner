@@ -78,6 +78,10 @@
   .conf.likely { background: transparent; border: 1.5px solid var(--ok); color: var(--ok); }
   .conf.unsure { background: transparent; border: 1.5px solid var(--warn); color: var(--warn); }
   .group.best { outline: 2px solid var(--ok); }
+  .badge.custom { background: transparent; border: 1px dashed var(--muted); color: var(--muted); }
+  .fld { display: block; font-size: 13px; color: var(--muted); margin: 8px 0; }
+  .fld input { display: block; width: 100%; margin-top: 4px; padding: 11px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); font-size: 16px; }
+  .linkish { background: none; padding: 6px 0; color: var(--accent); text-decoration: underline; font-size: 14px; }
   .search { width: 100%; padding: 11px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); }
 
   /* sheet */
@@ -224,6 +228,29 @@
   </div>
 </div>
 
+<div class="sheet-bg" id="unkBg">
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="unkTitle">
+    <h3 id="unkTitle">Card not in the database</h3>
+    <div class="status" style="margin-bottom:10px">For printings the app does not know yet (older or legacy versions, reprints,
+      new releases). It is added to your collection as your own entry.</div>
+    <label class="fld">Card name<input id="unkName" type="text" autocomplete="off" placeholder="As printed on the card"></label>
+    <label class="fld">Set and number (optional)<input id="unkSet" type="text" autocomplete="off" placeholder="e.g. MHA01 156/180, 1st Edition"></label>
+    <div class="qty">
+      <button id="unkMinus" aria-label="Fewer">−</button>
+      <output id="unkQty">1</output>
+      <button id="unkPlus" aria-label="More">+</button>
+    </div>
+    <label class="toggle" style="display:flex;justify-content:center"><input type="checkbox" id="unkAdd" checked> Add to my collection</label>
+    <label id="unkScanRow" class="toggle" style="display:flex;justify-content:center;margin-top:8px">
+      <input type="checkbox" id="unkIsScan" checked> This is the card I just scanned (keep the picture so it can be added)
+    </label>
+    <div class="actions" style="margin-top:14px">
+      <button id="unkCancel">Cancel</button>
+      <button class="primary" id="unkSave">Save</button>
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toast"><span id="toastMsg"></span><button id="toastUndo">Undo</button></div>
 
 <script src="fingerprint.js"></script>
@@ -233,7 +260,7 @@ const FP = window.UVSFingerprint;
 const CARD_W = 744, CARD_H = 1039, CARD_ASPECT = CARD_W / CARD_H;
 const TESSERACT_URL = "https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js";
 const STORE_KEY = "uvs.collection.v1";
-const APP_VERSION = "2026-11-20b";
+const APP_VERSION = "2026-11-20c";
 // Where opt-in scan uploads go (the Cloudflare Worker in worker/). Empty = feature hidden.
 // For testing, localStorage "uvs.uploadUrl" overrides it.
 const DEFAULT_UPLOAD_URL = "https://uvs-scan-uploads.snuggiettv.workers.dev/scan";
@@ -278,7 +305,7 @@ function cardImg(p, cls) {
   img.src = srcs[0] || "";
   return img;
 }
-function kindBadge(k) { return k && k !== "official" ? el("span", { class: "badge " + k }, k) : null; }
+function kindBadge(k) { return k && k !== "official" ? el("span", { class: "badge " + k }, k === "custom" ? "not in database" : k) : null; }
 function subLine(p) { return [p.l, p.s, p.no ? "#" + p.no : "", p.r].filter(Boolean).join(" · "); }
 
 // --------------------------------------------------------- collection
@@ -686,7 +713,8 @@ function renderResults(shot) {
     for (const info of g) wrap.append(printingRow(S.byId.get(info.id), info, (id) => openSheet(id, "scan")));
     box.append(wrap);
   }
-  if (!shot.resolved) box.append(el("p", { class: "status" }, "Not in the list? Find it by name below. The app saves this scan as a miss so matching can be improved."));
+  if (!shot.resolved) box.append(el("p", { class: "status" }, "Not in the list? Find it by name below. The app saves this scan as a miss so matching can be improved."),
+    el("button", { class: "linkish", onclick: () => openUnknown("") }, "My card isn't in the database"));
 }
 
 // ------------------------------------------------------- name search
@@ -700,7 +728,60 @@ function renderSearch() {
   const wrap = el("div", { class: "group" });
   for (const p of hits) wrap.append(printingRow(p, null, (id) => openSheet(id, "search")));
   if (!hits.length) wrap.append(el("div", { class: "gh", style: "padding:12px" }, "No card with that name."));
+  wrap.append(el("div", { style: "padding:4px 12px 8px" },
+    el("button", { class: "linkish", onclick: () => openUnknown($("search").value.trim()) }, "My card isn't in the database")));
   out.append(wrap);
+}
+
+// --------------------------------------------- cards not in the database
+// Saved as the user's own collection entry ("custom-..." id with the typed name/set and a small picture).
+// The scan is kept as a miss with picked "unknown", and shared (if on) so missing printings can be added.
+let unkQty = 1;
+function setUnkQty(n) { unkQty = Math.max(1, Math.min(999, n)); $("unkQty").textContent = unkQty; }
+function openUnknown(name) {
+  $("unkName").value = name || "";
+  $("unkSet").value = "";
+  $("unkAdd").checked = true;
+  $("unkScanRow").classList.toggle("hidden", !(S.lastScan && !S.lastScan.resolved));
+  $("unkIsScan").checked = true;
+  setUnkQty(1);
+  $("unkBg").classList.add("open");
+  setTimeout(() => $("unkName").focus(), 50);
+}
+function closeUnknown() { $("unkBg").classList.remove("open"); }
+function thumbOf(canvas) {
+  const t = el("canvas", { width: 80, height: Math.round(80 / CARD_ASPECT) });
+  t.getContext("2d").drawImage(canvas, 0, 0, t.width, t.height);
+  return t.toDataURL("image/jpeg", 0.7);
+}
+function saveUnknown() {
+  const name = $("unkName").value.trim().slice(0, 120), set = $("unkSet").value.trim().slice(0, 120), n = unkQty;
+  if (!name) { $("unkName").focus(); return; }
+  const shot = S.lastScan;
+  let fromScan = null;
+  if (shot && !shot.resolved && !$("unkScanRow").classList.contains("hidden") && $("unkIsScan").checked) {
+    shot.resolved = true;
+    fromScan = shot;
+    const top = rankShot(shot, 3).map((g) => g.map((x) => x.id));
+    const extra = { unknownName: name, unknownSet: set };
+    saveMiss(shot, "unknown", 0, top, extra);
+    if (contributing()) queueUpload(shot, "unknown", 0, top, extra);
+  }
+  let id = null;
+  if ($("unkAdd").checked) {
+    id = "custom-" + crypto.randomUUID().slice(0, 8);
+    addQty(id, n);
+    S.coll.entries[id].custom = { n: name, s: set, thumb: fromScan ? thumbOf(fromScan.canvas) : "" };
+    saveCollection();
+  }
+  closeUnknown();
+  showToast(id ? `${name}: added ${n} as your own entry` : "Saved. Thanks, it can be added to the database.", () => {
+    if (id) addQty(id, -n);
+    if (fromScan) { fromScan.resolved = false; forgetScan(fromScan.at); }
+    renderCollection(); if (S.lastScan) renderResults(S.lastScan);
+  });
+  renderCollection();
+  if (S.lastScan) renderResults(S.lastScan);
 }
 
 // ------------------------------------------------------------ sheet
@@ -765,7 +846,10 @@ function showToast(msg, undo) {
 
 // ------------------------------------------------------- collection view
 function collectionRows() {
-  return Object.entries(S.coll.entries).map(([id, e]) => ({ id, e, p: S.byId.get(id) || { id, n: "(unknown printing " + id + ")", s: "", no: "", k: "" } }))
+  const own = (id, e) => e.custom
+    ? { id, n: e.custom.n, s: e.custom.s || "", no: "", k: "custom", l: "", r: "", th: e.custom.thumb || "" }
+    : { id, n: "(unknown printing " + id + ")", s: "", no: "", k: "" };
+  return Object.entries(S.coll.entries).map(([id, e]) => ({ id, e, p: S.byId.get(id) || own(id, e) }))
     .sort((a, b) => a.p.n.localeCompare(b.p.n) || a.p.s.localeCompare(b.p.s));
 }
 function renderCollection() {
@@ -895,15 +979,15 @@ function missDb() {
 async function missStore(mode, name) { return (await missDb()).transaction(name || "misses", mode).objectStore(name || "misses"); }
 const idbReq = (r) => new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
 const device = () => /iPhone|iPad/.test(navigator.userAgent) ? "ios" : /Android/.test(navigator.userAgent) ? "android" : "other";
-async function scanRecord(shot, pickedId, rank, top) {
+async function scanRecord(shot, pickedId, rank, top, extra) {
   const jpeg = await new Promise((res) => shot.wide.canvas.toBlob(res, "image/jpeg", 0.9));
   return { at: shot.at, picked: pickedId, rank, top, names: shot.names.map((h) => h.name), textState: shot.textState,
     base: shot.wide.base, width: shot.wide.canvas.width, height: shot.wide.canvas.height,
-    search: S.searchOn, device: device(), appVersion: APP_VERSION, jpeg };
+    search: S.searchOn, device: device(), appVersion: APP_VERSION, ...(extra || {}), jpeg };
 }
-async function saveMiss(shot, pickedId, rank, top) {
+async function saveMiss(shot, pickedId, rank, top, extra) {
   try {
-    const rec = await scanRecord(shot, pickedId, rank, top);    // before opening the store: it closes while we wait
+    const rec = await scanRecord(shot, pickedId, rank, top, extra);    // before opening the store: it closes while we wait
     await idbReq((await missStore("readwrite")).put(rec));
     updateMissInfo();
   } catch (e) { console.warn("could not save missed scan", e); }
@@ -921,9 +1005,9 @@ function contributorId() {
     return id;
   } catch (e) { return ""; }
 }
-async function queueUpload(shot, pickedId, rank, top) {
+async function queueUpload(shot, pickedId, rank, top, extra) {
   try {
-    const rec = await scanRecord(shot, pickedId, rank, top);
+    const rec = await scanRecord(shot, pickedId, rank, top, extra);
     await idbReq((await missStore("readwrite", "uploads")).put(rec));
     flushUploads();
   } catch (e) { console.warn("could not queue upload", e); }
@@ -1034,6 +1118,11 @@ $("qMinus").onclick = () => setQty(qty - 1);
 $("qPlus").onclick = () => setQty(qty + 1);
 $("sheetCancel").onclick = closeSheet;
 $("sheetAdd").onclick = confirmAdd;
+$("unkSave").onclick = saveUnknown;
+$("unkCancel").onclick = closeUnknown;
+$("unkMinus").onclick = () => setUnkQty(unkQty - 1);
+$("unkPlus").onclick = () => setUnkQty(unkQty + 1);
+$("unkBg").onclick = (e) => { if (e.target === $("unkBg")) closeUnknown(); };
 $("sheetBg").onclick = (e) => { if (e.target === $("sheetBg")) closeSheet(); };
 $("toastUndo").onclick = () => { if (S.undo) S.undo(); S.undo = null; $("toast").classList.remove("show"); };
 $("btnCsv").onclick = exportCsv;
